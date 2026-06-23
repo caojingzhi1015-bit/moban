@@ -648,7 +648,6 @@ const App = (() => {
               }
             }
           },
-        }
       );
     } // end if (!pipelineResult)
 
