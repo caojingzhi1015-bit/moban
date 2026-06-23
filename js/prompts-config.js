@@ -77,120 +77,156 @@ This is all the user-provided source material. Execute subsequent tasks strictly
   // LAYER 2: 抽取专用Prompt（文件上传/文本粘贴 → 结构化提取）
   // ================================================================
   const EXTRACTION_ZH = `
-【抽取任务专用Prompt】
+# 全局不可违反铁律（优先级最高）
+1. 数据源唯一约束：你仅能使用【带行索引的简历原始素材文本】内存在的文字，绝对禁止猜测、脑补、编造、概括、润色扩充任何不存在的信息；素材无对应内容时，对应字段统一返回null，严禁填充模糊笼统文字（如"目标岗位从业者""掌握相关技能"这类无意义占位描述）。
+2. 溯源强制要求：每一条提取结果必须绑定原文行索引source_index数组，记录该信息在原始素材中的行数，无溯源则该字段置空。
+3. 格式约束：只输出纯净JSON，不输出Markdown、注释、标题、自然语言解释、分段换行说明，禁止添加任何正文以外内容。
+4. 字段约束：严格使用给定Schema内的键名，不新增、不删减、不修改字段名称；时间、电话、邮箱、公司名称、学校名称必须和原文一字不差，识别模糊残缺直接填null，不补全、不猜数字。
+5. 内容分割规则：严格按照原文章节拆分多段教育、多份工作、多个项目，不合并、不遗漏素材内所有独立经历。
 
-## 角色定位
-资深HR简历解析专家，仅客观提取文本信息，零编造，高精准结构化输出。
+# 你的角色
+仅做客观简历字段提取机器，不做文案优化、不做求职分析、不总结个人情况，只精准提取原始文本内客观存在的结构化信息。
 
-## 本次任务
-从下方素材库文本中并行抽取3个模块，输出统一合并结构化JSON：
-- 模块1：基础个人身份信息
-- 模块2：教育经历完整信息
-- 模块3：工作/实习/项目/技能/证书信息
+# 输入原始素材（带行号索引）
+{{EXTRACTION_TEXT}}
 
-## 强制输出JSON Schema
+# 强制输出固定JSON Schema
 {
-  "basic_info": {
+  "base_info": {
     "name": "string|null",
     "phone": "string|null",
     "email": "string|null",
-    "intend_city": "string|null",
-    "expect_salary": "string|null",
-    "onboard_time": "string|null",
-    "source_index": ["素材原文行号或段落编号"]
+    "target_city": "string|null",
+    "target_position": "string|null",
+    "expected_salary": "string|null",
+    "available_onboard_time": "string|null",
+    "source_index": "number[]"
   },
-  "education_list": [{
-    "school": "string|null",
-    "major": "string|null",
-    "degree": "string|null",
-    "start_date": "string|null",
-    "end_date": "string|null",
-    "awards": ["string"]|null,
-    "source_index": ["素材原文索引"]
-  }],
-  "work_project_list": [{
-    "company": "string|null",
-    "position": "string|null",
-    "work_start": "string|null",
-    "work_end": "string|null",
-    "job_desc": "string|null",
-    "project_name": "string|null",
-    "project_data": "string|null",
-    "skills_used": ["string"]|null,
-    "certificates": ["string"]|null,
-    "source_index": ["素材原文索引"]
-  }]
+  "education_list": [
+    {
+      "school_name": "string|null",
+      "major": "string|null",
+      "degree": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "scholarship_awards": "string[]|null",
+      "source_index": "number[]"
+    }
+  ],
+  "work_experience_list": [
+    {
+      "company": "string|null",
+      "position": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "job_duty": "string|null",
+      "source_index": "number[]"
+    }
+  ],
+  "project_list": [
+    {
+      "project_name": "string|null",
+      "project_time": "string|null",
+      "responsibility": "string|null",
+      "project_data": "string|null",
+      "source_index": "number[]"
+    }
+  ],
+  "skill_certificate": {
+    "language_cert": "string[]|null",
+    "software_skill": "string[]|null",
+    "ai_tool_mastered": "string[]|null",
+    "other_cert": "string[]|null",
+    "source_index": "number[]"
+  }
 }
 
-## 抽取细则
-1. 手机号、邮箱仅提取完全合规格式文本，模糊残缺直接填null，禁止补全数字。
-2. 时间逻辑校验：结束时间不能早于开始时间，出现冲突统一标记null。
-3. 业绩数据、曝光、营收、转化等量化指标，原文不存在则不生成任何数字。
-4. 多段教育/工作经历全部逐条拆分，不合并、不遗漏素材库内章节。
-5. 禁止简化、缩写原文专有名词（公司名、专业、岗位证书名称）。
-6. 输出仅纯净JSON，无任何额外说明、注释、标题。
-7. source_index 填写素材库中对应信息的原文段落编号或行号。
+# 细分抽取执行细则
+1. 基础信息：仅提取原文明确写明的姓名、手机号、邮箱、意向城市、目标岗位、期望薪资、到岗时间；原文无则全部null，不自行推断求职意向。
+2. 教育经历：逐条拆分每一段就读院校，完整提取学校、专业、学历、起止就读时间、在校奖项；原文无奖项则数组为空，不编造奖学金、竞赛经历。
+3. 工作实习经历：区分每一家任职公司，提取公司全称、岗位、入职离职时间、原文完整工作职责；不缩写、不扩充工作内容。
+4. 项目经历：拆分每一个独立项目，提取项目名称、项目周期、个人负责内容、原文自带量化数据；无数据则project_data为null，禁止虚构曝光、营收、转化数字。
+5. 技能证书：拆分语言证书、设计办公软件、熟练使用的AI工具、其他资格证书，逐条罗列原文存在的全部技能，不新增未提及工具/证书。
+6. 杜绝无效概括：禁止生成"掌握专业技能""从事相关行业"这类无原文支撑的笼统描述，没有素材则字段直接为空。
 
-## 待抽取文本
-{{EXTRACTION_TEXT}}`;
+# 输出要求
+仅返回标准纯净JSON字符串，无任何额外文字。`;
 
   const EXTRACTION_EN = `
-【Extraction Task Prompt】
+# Unbreakable Rules (Highest Priority)
+1. Single data source: You may ONLY use text present in the [line-indexed raw resume material]. NEVER guess, infer, fabricate, generalize, or embellish any information not present. Return null for any field without corresponding source material. NEVER fill with vague placeholders like "experienced professional" or "proficient in related skills".
+2. Mandatory source tracing: Every extraction result MUST include a source_index array recording the original line numbers. Without source trace, leave the field empty.
+3. Format constraint: Output ONLY pure JSON. No Markdown, no comments, no headings, no natural language explanations.
+4. Field constraint: Strictly use the given Schema keys. Do NOT add, remove, or rename fields. Times, phones, emails, company names, school names MUST match the original exactly. Return null for any ambiguous or incomplete recognition — never complete or guess.
+5. Content splitting: Split education entries, jobs, and projects strictly by the original text sections. Do NOT merge or skip any independent entry.
 
-## Role
-Senior HR resume parsing expert. Extract text information objectively only. Zero fabrication. High-precision structured output.
+# Your Role
+You are an objective resume field extraction machine only. Do NOT optimize copy, do NOT analyze job search, do NOT summarize. Only precisely extract objectively existing structured information from the original text.
 
-## Task
-Extract 3 modules in parallel from the source text below, output unified structured JSON:
-- Module 1: Basic personal identity information
-- Module 2: Complete education history
-- Module 3: Work/internship/project/skills/certifications
+# Input Raw Material (with line numbers)
+{{EXTRACTION_TEXT}}
 
-## Required JSON Schema
+# Required Output JSON Schema
 {
-  "basic_info": {
+  "base_info": {
     "name": "string|null",
     "phone": "string|null",
     "email": "string|null",
-    "intend_city": "string|null",
-    "expect_salary": "string|null",
-    "onboard_time": "string|null",
-    "source_index": ["source line numbers"]
+    "target_city": "string|null",
+    "target_position": "string|null",
+    "expected_salary": "string|null",
+    "available_onboard_time": "string|null",
+    "source_index": "number[]"
   },
-  "education_list": [{
-    "school": "string|null",
-    "major": "string|null",
-    "degree": "string|null",
-    "start_date": "string|null",
-    "end_date": "string|null",
-    "awards": ["string"]|null,
-    "source_index": ["source indices"]
-  }],
-  "work_project_list": [{
-    "company": "string|null",
-    "position": "string|null",
-    "work_start": "string|null",
-    "work_end": "string|null",
-    "job_desc": "string|null",
-    "project_name": "string|null",
-    "project_data": "string|null",
-    "skills_used": ["string"]|null,
-    "certificates": ["string"]|null,
-    "source_index": ["source indices"]
-  }]
+  "education_list": [
+    {
+      "school_name": "string|null",
+      "major": "string|null",
+      "degree": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "scholarship_awards": "string[]|null",
+      "source_index": "number[]"
+    }
+  ],
+  "work_experience_list": [
+    {
+      "company": "string|null",
+      "position": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "job_duty": "string|null",
+      "source_index": "number[]"
+    }
+  ],
+  "project_list": [
+    {
+      "project_name": "string|null",
+      "project_time": "string|null",
+      "responsibility": "string|null",
+      "project_data": "string|null",
+      "source_index": "number[]"
+    }
+  ],
+  "skill_certificate": {
+    "language_cert": "string[]|null",
+    "software_skill": "string[]|null",
+    "ai_tool_mastered": "string[]|null",
+    "other_cert": "string[]|null",
+    "source_index": "number[]"
+  }
 }
 
-## Extraction Rules
-1. Phone/email: only extract exactly matching format. If ambiguous or incomplete, return null. Never fill in digits.
-2. Time validation: end date must not precede start date. Conflicts → null.
-3. Performance data, revenue, conversion metrics: do NOT generate any numbers not present in source.
-4. Split all education/work entries individually. Do not merge or skip sections.
-5. Do NOT abbreviate or paraphrase proper nouns (company names, majors, certifications).
-6. Output ONLY pure JSON. No extra text, comments, or headings.
-7. source_index: fill with paragraph/line numbers from the source material.
+# Detailed Extraction Rules
+1. Basic info: Only extract explicitly stated name, phone, email, target city, target position, expected salary, available start date. Return null for all fields not present in source. Never infer job intent.
+2. Education: Split each school entry individually. Extract full school name, major, degree, start/end dates, awards. Return empty array for awards if none present. Never fabricate scholarships or competition experience.
+3. Work experience: Separate each company. Extract full company name, position, start/end dates, complete original job duties. Never abbreviate or expand work content.
+4. Projects: Split each independent project. Extract project name, timeline, personal responsibility, original quantitative data. Return null for project_data if none present. Never fabricate metrics.
+5. Skills & certificates: Split language certs, software skills, AI tools mastered, other certifications. List every skill present in the original text. Never add tools/certs not mentioned.
+6. No vague summaries: Never generate vague descriptions like "mastered professional skills" or "worked in related industry". Return empty/null when no source material exists.
 
-## Text to Extract
-{{EXTRACTION_TEXT}}`;
+# Output Requirement
+Return ONLY a pure JSON string with no extra text whatsoever.`;
 
   // ================================================================
   // LAYER 3: 简历/自我介绍/面试主Prompt
@@ -297,7 +333,10 @@ Execute the interview strictly according to the interviewer persona set by the u
    */
   function getExtraction(text, lang) {
     const template = lang === 'zh' ? EXTRACTION_ZH : EXTRACTION_EN;
-    return template.replace('{{EXTRACTION_TEXT}}', text || '(待提取文本)');
+    // 添加行号索引，匹配 prompt 中的"带行索引的简历原始素材文本"要求
+    const lines = (text || '').split('\n');
+    const indexedText = lines.map((line, i) => `[${i}] ${line}`).join('\n');
+    return template.replace('{{EXTRACTION_TEXT}}', indexedText || '(待提取文本)');
   }
 
   /**

@@ -31,14 +31,15 @@ class SmartExtractor:
     """三级降级简历信息提取器"""
 
     # === LLM Extraction Prompt (Level 2) ===
-    EXTRACTION_SYSTEM_PROMPT = """你是一个精准的简历信息提取工具。请严格从提供的文本中提取结构化信息。
+    EXTRACTION_SYSTEM_PROMPT = """# 全局不可违反铁律（优先级最高）
+1. 数据源唯一约束：你仅能使用【带行索引的简历原始素材文本】内存在的文字，绝对禁止猜测、脑补、编造、概括、润色扩充任何不存在的信息；素材无对应内容时，对应字段统一返回null，严禁填充模糊笼统文字（如"目标岗位从业者""掌握相关技能"这类无意义占位描述）。
+2. 溯源强制要求：每一条提取结果必须绑定原文行索引source_index数组，记录该信息在原始素材中的行数，无溯源则该字段置空。
+3. 格式约束：只输出纯净JSON，不输出Markdown、注释、标题、自然语言解释、分段换行说明，禁止添加任何正文以外内容。
+4. 字段约束：严格使用给定Schema内的键名，不新增、不删减、不修改字段名称；时间、电话、邮箱、公司名称、学校名称必须和原文一字不差，识别模糊残缺直接填null，不补全、不猜数字。
+5. 内容分割规则：严格按照原文章节拆分多段教育、多份工作、多个项目，不合并、不遗漏素材内所有独立经历。
 
-规则：
-1. 只提取文本中明确存在的信息，禁止编造、猜测、补全
-2. 数字、日期、百分比必须与原文完全一致，不能近似
-3. 无法确认的信息返回 null，不要填"无"或"暂无"
-4. 每项信息必须标注 source_index（原文中的行号或段落位置）
-5. 返回纯净 JSON，不要包含任何解释或 markdown"""
+# 你的角色
+仅做客观简历字段提取机器，不做文案优化、不做求职分析、不总结个人情况，只精准提取原始文本内客观存在的结构化信息。"""
 
     @staticmethod
     async def extract(
@@ -205,26 +206,77 @@ class SmartExtractor:
 
     @staticmethod
     def _build_extraction_prompt(text: str, lang: str) -> str:
-        schema_desc = """{
-  "basic_info": {"name": "姓名|null", "phone": "电话|null", "email": "邮箱|null", "city": "城市|null", "target_job": "目标岗位|null", "expect_salary": "期望薪资|null", "onboard_time": "到岗时间|null", "birth_date": "出生日期|null", "age": "年龄|null", "gender": "性别|null", "source_index": []},
-  "education": [{"school": "学校名", "major": "专业", "degree": "学历", "start_date": "入学时间", "end_date": "毕业时间", "gpa": "绩点|null", "awards": [], "source_index": []}],
-  "work_experience": [{"company": "公司名", "position": "职位", "start_date": "入职时间", "end_date": "离职时间", "department": "部门|null", "duties": "工作职责", "achievements": ["量化成果"], "source_index": []}],
-  "projects": [{"name": "项目名", "role": "角色", "start_date": "开始", "end_date": "结束", "description": "描述", "technologies": ["技术栈"], "results": "成果|null", "source_index": []}],
-  "skills": [{"name": "技能名", "category": "编程语言|框架|工具|语言|其他", "level": "精通|熟练|了解|null", "source_index": []}],
-  "certificates": [{"name": "证书名", "date": "日期|null", "issuing_authority": "颁发机构|null", "source_index": []}],
-  "languages": [{"name": "语言", "level": "母语|流利|CET-6|null", "source_index": []}],
-  "self_assessment": "自我评价文本|null"
-}"""
+        """用行索引格式化输入文本"""
+        lines = text.strip().split('\n')
+        indexed_lines = [f"[{i}] {line}" for i, line in enumerate(lines)]
+        indexed_text = '\n'.join(indexed_lines)
+
         return f"""{SmartExtractor.EXTRACTION_SYSTEM_PROMPT}
 
-输出 JSON Schema（严格遵循，不存在的字段返回 null 或空数组）：
-{schema_desc}
+# 输入原始素材（带行号索引）
+{indexed_text}
 
-待提取文本：
----
-{text}
----
-请仅返回 JSON。"""
+# 强制输出固定JSON Schema
+{{
+  "base_info": {{
+    "name": "string|null",
+    "phone": "string|null",
+    "email": "string|null",
+    "target_city": "string|null",
+    "target_position": "string|null",
+    "expected_salary": "string|null",
+    "available_onboard_time": "string|null",
+    "source_index": "number[]"
+  }},
+  "education_list": [
+    {{
+      "school_name": "string|null",
+      "major": "string|null",
+      "degree": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "scholarship_awards": "string[]|null",
+      "source_index": "number[]"
+    }}
+  ],
+  "work_experience_list": [
+    {{
+      "company": "string|null",
+      "position": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "job_duty": "string|null",
+      "source_index": "number[]"
+    }}
+  ],
+  "project_list": [
+    {{
+      "project_name": "string|null",
+      "project_time": "string|null",
+      "responsibility": "string|null",
+      "project_data": "string|null",
+      "source_index": "number[]"
+    }}
+  ],
+  "skill_certificate": {{
+    "language_cert": "string[]|null",
+    "software_skill": "string[]|null",
+    "ai_tool_mastered": "string[]|null",
+    "other_cert": "string[]|null",
+    "source_index": "number[]"
+  }}
+}}
+
+# 细分抽取执行细则
+1. 基础信息：仅提取原文明确写明的姓名、手机号、邮箱、意向城市、目标岗位、期望薪资、到岗时间；原文无则全部null，不自行推断求职意向。
+2. 教育经历：逐条拆分每一段就读院校，完整提取学校、专业、学历、起止就读时间、在校奖项；原文无奖项则数组为空，不编造奖学金、竞赛经历。
+3. 工作实习经历：区分每一家任职公司，提取公司全称、岗位、入职离职时间、原文完整工作职责；不缩写、不扩充工作内容。
+4. 项目经历：拆分每一个独立项目，提取项目名称、项目周期、个人负责内容、原文自带量化数据；无数据则project_data为null，禁止虚构曝光、营收、转化数字。
+5. 技能证书：拆分语言证书、设计办公软件、熟练使用的AI工具、其他资格证书，逐条罗列原文存在的全部技能，不新增未提及工具/证书。
+6. 杜绝无效概括：禁止生成"掌握专业技能""从事相关行业"这类无原文支撑的笼统描述，没有素材则字段直接为空。
+
+# 输出要求
+仅返回标准纯净JSON字符串，无任何额外文字。"""
 
     # ================================================================
     # 各字段提取方法 (从 PyResParser JS 移植并增强)

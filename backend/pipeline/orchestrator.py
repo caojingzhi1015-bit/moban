@@ -87,9 +87,12 @@ class ExtractionOrchestrator:
         confidence = extracted.get("confidence", 0.7)
         log_step(3, f"提取完成: method={extraction_method}, confidence={confidence}")
 
+        # Step 3.5: Schema 归一化 — 将 LLM 输出的新 schema 映射到内部格式
+        normalized = self._normalize_llm_schema(extracted)
+
         # Step 4: Schema Lock — 清理非法字段和占位符
         log_step(4, "Schema Lock — 清理非法字段和占位符...")
-        locked = self._schema_lock(extracted, hard_fields)
+        locked = self._schema_lock(normalized, hard_fields)
         log_step(4, f"Schema Lock 完成: basic_info keys={list(locked.get('basic_info',{}).keys())}")
 
         # Step 5: 验证 — FactChecker 增强版
@@ -185,6 +188,117 @@ class ExtractionOrchestrator:
         locked["source_index"] = extracted.get("source_index", {})
 
         return locked
+
+    @staticmethod
+    def _normalize_llm_schema(extracted: dict) -> dict:
+        """将 LLM 输出的新 Prompt 格式映射到内部 API schema
+
+        LLM 输出 (用户新 Prompt):
+          base_info → internal basic_info
+          education_list → internal education
+          work_experience_list → internal work_experience
+          project_list → internal projects
+          skill_certificate → internal skills + certificates + languages
+        """
+        # 检测是否已经是旧 schema（无 base_info 但有 basic_info）
+        if "basic_info" in extracted and "base_info" not in extracted:
+            return extracted  # 已经是内部格式，无需转换
+
+        normalized = {}
+
+        # 归一化 base_info → basic_info
+        base = extracted.get("base_info", {})
+        if base:
+            normalized["basic_info"] = {
+                "name": base.get("name"),
+                "phone": base.get("phone"),
+                "email": base.get("email"),
+                "city": base.get("target_city"),
+                "target_job": base.get("target_position"),
+                "expect_salary": base.get("expected_salary"),
+                "onboard_time": base.get("available_onboard_time"),
+                "source_index": base.get("source_index", []),
+            }
+        else:
+            normalized["basic_info"] = {}
+
+        # 归一化 education_list → education
+        edu_list = extracted.get("education_list", [])
+        normalized["education"] = []
+        for e in edu_list:
+            normalized["education"].append({
+                "school": e.get("school_name"),
+                "major": e.get("major"),
+                "degree": e.get("degree"),
+                "start_date": e.get("start_date"),
+                "end_date": e.get("end_date"),
+                "awards": e.get("scholarship_awards") or [],
+                "source_index": e.get("source_index", []),
+            })
+
+        # 归一化 work_experience_list → work_experience
+        work_list = extracted.get("work_experience_list", [])
+        normalized["work_experience"] = []
+        for w in work_list:
+            normalized["work_experience"].append({
+                "company": w.get("company"),
+                "position": w.get("position"),
+                "start_date": w.get("start_date"),
+                "end_date": w.get("end_date"),
+                "duties": w.get("job_duty"),
+                "achievements": [],
+                "source_index": w.get("source_index", []),
+            })
+
+        # 归一化 project_list → projects
+        proj_list = extracted.get("project_list", [])
+        normalized["projects"] = []
+        for p in proj_list:
+            normalized["projects"].append({
+                "name": p.get("project_name"),
+                "role": p.get("responsibility"),
+                "start_date": None,
+                "end_date": None,
+                "description": p.get("responsibility"),
+                "results": p.get("project_data"),
+                "technologies": [],
+                "source_index": p.get("source_index", []),
+            })
+            # 尝试解析 project_time 为日期范围
+            pt = p.get("project_time", "")
+            if pt:
+                from backend.utils.text_normalizer import extract_date_range
+                dr = extract_date_range(pt)
+                if dr:
+                    normalized["projects"][-1]["start_date"] = dr["start"]
+                    normalized["projects"][-1]["end_date"] = dr["end"]
+
+        # 归一化 skill_certificate → skills + certificates + languages
+        sc = extracted.get("skill_certificate", {})
+        normalized["skills"] = []
+        normalized["certificates"] = []
+        normalized["languages"] = []
+
+        if sc:
+            src_idx = sc.get("source_index", [])
+            # 语言证书
+            for lang_name in (sc.get("language_cert") or []):
+                normalized["languages"].append({"name": lang_name, "level": None, "source_index": src_idx})
+            # 软件技能
+            for skill_name in (sc.get("software_skill") or []):
+                normalized["skills"].append({"name": skill_name, "category": "工具", "level": None, "source_index": src_idx})
+            # AI 工具
+            for tool_name in (sc.get("ai_tool_mastered") or []):
+                normalized["skills"].append({"name": tool_name, "category": "AI工具", "level": None, "source_index": src_idx})
+            # 其他证书
+            for cert_name in (sc.get("other_cert") or []):
+                normalized["certificates"].append({"name": cert_name, "date": None, "issuing_authority": None, "source_index": src_idx})
+
+        # 保留 self_assessment
+        normalized["self_assessment"] = extracted.get("self_assessment")
+        normalized["source_index"] = extracted.get("source_index", {})
+
+        return normalized
 
     @staticmethod
     def _flatten_extracted(extracted: dict) -> str:
