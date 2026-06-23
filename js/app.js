@@ -197,7 +197,7 @@ const App = (() => {
         state.jdImageData = null;
       });
       // Simulate OCR
-      simulateOCR('jd-image-text', '请在此编辑AI识别出的JD文字...\n（图片文字识别为本地模拟，请手动修正关键信息）');
+      performImageOCR(data.dataURL, 'jd-image-text', 'JD');
     });
 
     setupImageUpload('personal', (data) => {
@@ -214,7 +214,7 @@ const App = (() => {
         document.getElementById('personal-image-text').classList.add('hidden');
         state.personalImageData = null;
       });
-      simulateOCR('personal-image-text', '请在此编辑AI识别出的个人信息...\n（图片文字识别为本地模拟，请手动修正关键信息）');
+      performImageOCR(data.dataURL, 'personal-image-text', '简历');
     });
   }
 
@@ -343,15 +343,44 @@ const App = (() => {
   }
 
   function processUploadedFile(file, callback) {
-    // Show extraction progress with OCR status
     showLoading('正在解析文件并提取文字...');
 
-    // Prefer DeepSeek-VL for image/PDF (if API key configured)
-    // Fallback to FileParser (PDF.js + Tesseract.js) if no DeepSeek key
-    const useDeepSeek = DeepSeekAPI.getApiKey() && ['png','jpg','jpeg','webp','pdf'].includes(getFileExt(file.name));
+    // 图片文件 → 优先用后端 VL OCR，其次浏览器端 DeepSeek-VL，最后 Tesseract.js
+    const isImage = ['png','jpg','jpeg','webp','bmp','gif'].includes(getFileExt(file.name));
+    const isPDF = getFileExt(file.name) === 'pdf';
 
+    // 图片文件 + 后端可用 → 用后端 parse 接口（后端内部调 VL OCR）
+    if (isImage && window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
+      BackendAPI.parseFile(file, { lang: I18N.getLang() }).then(result => {
+        hideLoading();
+        if (result.success && result.markdown) {
+          showToast('✅ 后端 VL OCR 识别完成', 'success');
+          callback({
+            name: file.name, size: file.size, type: file.type,
+            extension: getFileExt(file.name), icon: getFileIconFor(file.name),
+            extractedText: result.markdown, method: 'backend-vl-ocr',
+          });
+        } else {
+          // 后端失败 → 降级浏览器端
+          _parseFileLocal(file, callback);
+        }
+      }).catch(() => _parseFileLocal(file, callback));
+      return;
+    }
+
+    _parseFileLocal(file, callback);
+  }
+
+  function _parseFileLocal(file, callback) {
+    showLoading('正在本地解析文件 (PDF.js/Tesseract/DeepSeek-VL)...');
+    const isImage = ['png','jpg','jpeg','webp','bmp','gif'].includes(getFileExt(file.name));
+    const isPDF = getFileExt(file.name) === 'pdf';
+
+    // 图片/PDF + DeepSeek API key → 用 DeepSeek-VL
+    const useDeepSeek = DeepSeekAPI.getApiKey() && (isImage || isPDF);
     const parser = useDeepSeek ? DeepSeekFileParser : FileParser;
-    FileParser.parseFile(file, {
+
+    parser.parseFile(file, {
       lang: I18N.getLang() === 'zh' ? 'chi_sim+eng' : 'eng',
       onProgress: (info) => {
         if (info.status === 'ocr_progress') {
@@ -486,16 +515,76 @@ const App = (() => {
     });
   }
 
-  function simulateOCR(textareaId, placeholderText) {
+  /**
+   * 图片 VL OCR — 将图片 dataURL 发送到多模态模型识别文字，回填到输入框
+   *
+   * 流程（三级降级）：
+   * 1. 后端 API /api/parse（服务端调 VL OCR）
+   * 2. 浏览器端 DeepSeek-VL visionRecognition（API key 可配）
+   * 3. 提示用户手动输入（无可用 OCR 通道）
+   */
+  async function performImageOCR(dataURL, textareaId, contentType) {
     const textarea = document.getElementById(textareaId);
-    if (!textarea) return;
-    showLoading('AI正在识别图片文字...');
-    setTimeout(() => {
-      hideLoading();
-      textarea.value = placeholderText;
+    if (!textarea || !dataURL) return;
+
+    showLoading('AI 正在识别图片文字... (VL多模态)');
+    let ocrText = null;
+    let method = null;
+
+    // === Level 1: 后端 API（服务端 VL OCR） ===
+    if (window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
+      try {
+        const blob = dataURLtoBlob(dataURL);
+        const file = new File([blob], `image_${Date.now()}.png`, { type: 'image/png' });
+        const result = await BackendAPI.parseFile(file, { lang: I18N.getLang(), fallback: false });
+        if (result.success && result.markdown && result.markdown.length > 10) {
+          ocrText = result.markdown;
+          method = 'backend-vl-ocr';
+        }
+      } catch (e) { console.warn('[OCR] Backend VL failed:', e.message); }
+    }
+
+    // === Level 2: 浏览器端 DeepSeek-VL ===
+    if (!ocrText && window.DeepSeekAPI && DeepSeekAPI.getApiKey()) {
+      try {
+        const prompt = contentType === 'JD'
+          ? '你是一个精准的OCR识别工具。请严格识别并提取图片中的所有文字内容，保持原文格式和结构。完整提取岗位职责、任职要求、技能要求。数字、日期、百分比必须精确识别。不要添加任何不属于图片原文的内容。'
+          : '你是一个精准的OCR识别工具。请严格识别并提取图片中的所有文字内容，保持原文格式和结构。如果是简历：提取姓名、联系方式、教育经历、工作经历、项目经历、技能证书、自我评价。数字、日期、百分比必须精确识别，不能近似或编造。';
+        const result = await DeepSeekAPI.visionRecognition([dataURL], prompt);
+        if (result.success && result.content && result.content.length > 10) {
+          ocrText = result.content;
+          method = 'deepseek-vl';
+        }
+      } catch (e) { console.warn('[OCR] DeepSeek-VL failed:', e.message); }
+    }
+
+    hideLoading();
+
+    // === 回填文本框 ===
+    if (ocrText) {
+      textarea.value = ocrText;
       textarea.focus();
-      showToast('图片已加载，请手动编辑修正识别结果', 'info');
-    }, 1000);
+      showToast(`✅ ${method === 'backend-vl-ocr' ? '后端 VL OCR' : 'DeepSeek-VL'} 识别完成，请核对修改`, 'success');
+      // 如果文案里包含 "本地模拟" 则清除
+      if (textarea.value.includes('本地模拟')) {
+        textarea.value = textarea.value.replace(/.*本地模拟.*\n?/g, '');
+      }
+    } else {
+      // Level 3: 无可用的 OCR 通道
+      textarea.placeholder = 'OCR 通道不可用（后端未启动 + DeepSeek API Key 未配置）。\n请手动粘贴图片中的文字内容。\n也可以启动后端以获得自动 OCR 功能。';
+      textarea.focus();
+      showToast('⚠️ OCR 通道不可用，请手动输入图片文字', 'warning');
+    }
+  }
+
+  /** data URL 转 Blob */
+  function dataURLtoBlob(dataURL) {
+    const parts = dataURL.split(',');
+    const mime = parts[0].match(/:(.*?);/)[1];
+    const bytes = atob(parts[1]);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    return new Blob([arr], { type: mime });
   }
 
   // === JD Events ===
