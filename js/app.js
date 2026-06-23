@@ -600,26 +600,57 @@ const App = (() => {
         logContainer.innerHTML = '<div class="extraction-progress-title">🔍 正在执行提取流水线...</div>';
       }
 
-      const pipelineResult = await ExtractionPipeline.runFullPipeline(
-        fileToProcess || new File([textToProcess], 'input.txt', { type: 'text/plain' }),
-        {
-          lang: I18N.getLang(),
-          onProgress: (info) => {
-            if (logContainer) {
-              const existing = logContainer.querySelector('.pipeline-logs') || document.createElement('div');
-              if (!existing.classList.contains('pipeline-logs')) {
-                existing.className = 'pipeline-logs';
-                logContainer.appendChild(existing);
+      const logProgress = (msg) => {
+        if (logContainer) {
+          const entry = document.createElement('div');
+          entry.className = 'pipeline-log-entry pipeline-log-info';
+          entry.textContent = msg;
+          logContainer.appendChild(entry);
+          logContainer.scrollTop = logContainer.scrollHeight;
+        }
+        console.log('[Extraction]', msg);
+      };
+
+      // === 优先使用后端 API（如果可用） ===
+      let pipelineResult;
+      if (window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
+        try {
+          logProgress('🚀 使用后端提取引擎 (SmartResume → LLM → Regex)...');
+          const backendFile = fileToProcess || new File([textToProcess], 'input.txt', { type: 'text/plain' });
+          const parsed = await BackendAPI.parseFile(backendFile, { lang: I18N.getLang(), fallback: false });
+          if (parsed.success && parsed.markdown) {
+            const extracted = await BackendAPI.extractResume(parsed.markdown, { lang: I18N.getLang(), fallback: false });
+            if (extracted.success || extracted.basic_info) {
+              pipelineResult = { ...extracted, log: [] };
+              logProgress('✅ 后端提取完成: method=' + (extracted.method || '?') + ', confidence=' + (extracted.confidence || '?'));
+            }
+          }
+        } catch (e) { console.warn('[App] Backend extract failed, falling back:', e.message); }
+      }
+      if (!pipelineResult) {
+        logProgress('🖥️ 使用浏览器端提取引擎...');
+        pipelineResult = await ExtractionPipeline.runFullPipeline(
+          fileToProcess || new File([textToProcess], 'input.txt', { type: 'text/plain' }),
+          {
+            lang: I18N.getLang(),
+            onProgress: (info) => {
+              if (logContainer) {
+                const existing = logContainer.querySelector('.pipeline-logs') || document.createElement('div');
+                if (!existing.classList.contains('pipeline-logs')) {
+                  existing.className = 'pipeline-logs';
+                  logContainer.appendChild(existing);
+                }
+                const entry = document.createElement('div');
+                entry.className = `pipeline-log-entry pipeline-log-${info.type || 'info'}`;
+                entry.textContent = info.stage;
+                existing.appendChild(entry);
+                existing.scrollTop = existing.scrollHeight;
               }
-              const entry = document.createElement('div');
-              entry.className = `pipeline-log-entry pipeline-log-${info.type || 'info'}`;
-              entry.textContent = info.stage;
-              existing.appendChild(entry);
-              existing.scrollTop = existing.scrollHeight;
             }
           },
         }
       );
+    } // end if (!pipelineResult)
 
       // === Handle Result ===
       if (pipelineResult.success && pipelineResult.data) {

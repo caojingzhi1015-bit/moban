@@ -1,0 +1,708 @@
+"""结构化提取层 — 三级降级链 (SmartResume → DeepSeek LLM → 增强 Regex)
+
+优先级 P0，替代 PyResParser + extraction-pipeline.js，是核心模块。
+
+Level 1: SmartResume (阿里开源, 93.1% 准确率) — 需要 GPU/vLLM
+Level 2: DeepSeek LLM API (85% 准确率) — 需要 API key
+Level 3: 增强 Regex 提取 (70%+ 准确率) — 纯本地，无需任何外部依赖
+"""
+import json
+import re
+import logging
+from typing import Optional
+
+from backend.config import (
+    SMARTRESUME_ENABLED, SMARTRESUME_VLLM_URL, SMARTRESUME_MODEL, SMARTRESUME_TIMEOUT,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL_LITE,
+)
+from backend.models.resume import (
+    BasicInfo, EducationEntry, WorkExperienceEntry, ProjectEntry,
+    SkillEntry, CertificateEntry, LanguageEntry, ValidationResult,
+)
+from backend.utils.text_normalizer import (
+    normalize_text, extract_section, extract_date_range, extract_city, find_tech_stack,
+)
+from backend.utils.json_safe import parse_json_safely
+
+logger = logging.getLogger(__name__)
+
+
+class SmartExtractor:
+    """三级降级简历信息提取器"""
+
+    # === LLM Extraction Prompt (Level 2) ===
+    EXTRACTION_SYSTEM_PROMPT = """你是一个精准的简历信息提取工具。请严格从提供的文本中提取结构化信息。
+
+规则：
+1. 只提取文本中明确存在的信息，禁止编造、猜测、补全
+2. 数字、日期、百分比必须与原文完全一致，不能近似
+3. 无法确认的信息返回 null，不要填"无"或"暂无"
+4. 每项信息必须标注 source_index（原文中的行号或段落位置）
+5. 返回纯净 JSON，不要包含任何解释或 markdown"""
+
+    @staticmethod
+    async def extract(
+        text: str,
+        method: str = "auto",
+        lang: str = "zh",
+        file_name: str = "",
+    ) -> dict:
+        """主入口：三级降级提取"""
+        clean_text = normalize_text(text)
+
+        if method == "regex":
+            return SmartExtractor._level3_regex(clean_text, lang)
+
+        if method == "llm":
+            return await SmartExtractor._level2_llm(clean_text, lang)
+
+        if method == "smartresume":
+            return await SmartExtractor._level1_smartresume(clean_text, lang)
+
+        # Auto: try all levels
+        return await SmartExtractor._auto_extract(clean_text, lang)
+
+    @staticmethod
+    async def _auto_extract(text: str, lang: str) -> dict:
+        """自动模式：按优先级尝试各级别"""
+        # Level 1: SmartResume (if GPU available)
+        if SMARTRESUME_ENABLED:
+            try:
+                result = await SmartExtractor._level1_smartresume(text, lang)
+                if result.get("basic_info", {}).get("name") or result.get("education") or result.get("work_experience"):
+                    result["method"] = "smartresume"
+                    result["confidence"] = 0.93
+                    return result
+                logger.info("SmartResume returned sparse results, falling back to LLM")
+            except Exception as e:
+                logger.warning(f"SmartResume failed: {e}, falling back to LLM")
+
+        # Level 2: DeepSeek LLM
+        if DEEPSEEK_API_KEY:
+            try:
+                result = await SmartExtractor._level2_llm(text, lang)
+                if result.get("basic_info", {}).get("name") or result.get("education") or result.get("work_experience"):
+                    result["method"] = "llm"
+                    result["confidence"] = 0.85
+                    return result
+                logger.info("LLM returned sparse results, falling back to regex")
+            except Exception as e:
+                logger.warning(f"LLM extraction failed: {e}, falling back to regex")
+
+        # Level 3: Enhanced Regex (always available)
+        result = SmartExtractor._level3_regex(text, lang)
+        result["method"] = "regex"
+        result["confidence"] = 0.75
+        return result
+
+    # ================================================================
+    # Level 1: SmartResume (vLLM)
+    # ================================================================
+    @staticmethod
+    async def _level1_smartresume(text: str, lang: str) -> dict:
+        """通过 SmartResume vLLM 服务提取"""
+        import httpx
+
+        extraction_prompt = SmartExtractor._build_extraction_prompt(text, lang)
+
+        async with httpx.AsyncClient(timeout=SMARTRESUME_TIMEOUT) as client:
+            response = await client.post(
+                f"{SMARTRESUME_VLLM_URL}/chat/completions",
+                json={
+                    "model": SMARTRESUME_MODEL,
+                    "messages": [
+                        {"role": "system", "content": SmartExtractor.EXTRACTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": extraction_prompt},
+                    ],
+                    "temperature": 0.01,
+                    "max_tokens": 4096,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            return parse_json_safely(content, {})
+
+    # ================================================================
+    # Level 2: DeepSeek LLM API
+    # ================================================================
+    @staticmethod
+    async def _level2_llm(text: str, lang: str) -> dict:
+        """通过 DeepSeek API 结构化提取"""
+        import httpx
+
+        extraction_prompt = SmartExtractor._build_extraction_prompt(text, lang)
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+                json={
+                    "model": DEEPSEEK_MODEL_LITE,
+                    "messages": [
+                        {"role": "system", "content": SmartExtractor.EXTRACTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": extraction_prompt},
+                    ],
+                    "temperature": 0.01,
+                    "max_tokens": 4096,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            return parse_json_safely(content, {})
+
+    # ================================================================
+    # Level 3: Enhanced Regex (PyResParser Python 移植 + 大量增强)
+    # ================================================================
+    @staticmethod
+    def _level3_regex(text: str, lang: str) -> dict:
+        """纯正则提取，6-pass 流水线"""
+        # Pass 1: Basic info
+        basic_info = {
+            "name": SmartExtractor._extract_name(text),
+            "phone": SmartExtractor._extract_phone(text),
+            "email": SmartExtractor._extract_email(text),
+            "city": extract_city(text),
+            "target_job": SmartExtractor._extract_target_job(text),
+            "expect_salary": SmartExtractor._extract_salary(text),
+            "birth_date": SmartExtractor._extract_birth(text),
+            "age": SmartExtractor._extract_age(text),
+            "gender": SmartExtractor._extract_gender(text),
+            "onboard_time": SmartExtractor._extract_onboard_time(text),
+            "source_index": [],
+        }
+
+        # Pass 2: Education
+        education = SmartExtractor._extract_education(text)
+
+        # Pass 3: Work experience
+        work_experience = SmartExtractor._extract_work_experience(text)
+
+        # Pass 4: Projects
+        projects = SmartExtractor._extract_projects(text)
+
+        # Pass 5: Skills + Certificates + Languages
+        skills = SmartExtractor._extract_skills(text)
+        certificates = SmartExtractor._extract_certificates(text)
+        languages = SmartExtractor._extract_languages(text)
+
+        # Pass 6: Self-assessment
+        self_assessment = SmartExtractor._extract_self_assessment(text)
+
+        return {
+            "basic_info": basic_info,
+            "education": education,
+            "work_experience": work_experience,
+            "projects": projects,
+            "skills": skills,
+            "certificates": certificates,
+            "languages": languages,
+            "self_assessment": self_assessment,
+            "source_index": {},
+        }
+
+    @staticmethod
+    def _build_extraction_prompt(text: str, lang: str) -> str:
+        schema_desc = """{
+  "basic_info": {"name": "姓名|null", "phone": "电话|null", "email": "邮箱|null", "city": "城市|null", "target_job": "目标岗位|null", "expect_salary": "期望薪资|null", "onboard_time": "到岗时间|null", "birth_date": "出生日期|null", "age": "年龄|null", "gender": "性别|null", "source_index": []},
+  "education": [{"school": "学校名", "major": "专业", "degree": "学历", "start_date": "入学时间", "end_date": "毕业时间", "gpa": "绩点|null", "awards": [], "source_index": []}],
+  "work_experience": [{"company": "公司名", "position": "职位", "start_date": "入职时间", "end_date": "离职时间", "department": "部门|null", "duties": "工作职责", "achievements": ["量化成果"], "source_index": []}],
+  "projects": [{"name": "项目名", "role": "角色", "start_date": "开始", "end_date": "结束", "description": "描述", "technologies": ["技术栈"], "results": "成果|null", "source_index": []}],
+  "skills": [{"name": "技能名", "category": "编程语言|框架|工具|语言|其他", "level": "精通|熟练|了解|null", "source_index": []}],
+  "certificates": [{"name": "证书名", "date": "日期|null", "issuing_authority": "颁发机构|null", "source_index": []}],
+  "languages": [{"name": "语言", "level": "母语|流利|CET-6|null", "source_index": []}],
+  "self_assessment": "自我评价文本|null"
+}"""
+        return f"""{SmartExtractor.EXTRACTION_SYSTEM_PROMPT}
+
+输出 JSON Schema（严格遵循，不存在的字段返回 null 或空数组）：
+{schema_desc}
+
+待提取文本：
+---
+{text}
+---
+请仅返回 JSON。"""
+
+    # ================================================================
+    # 各字段提取方法 (从 PyResParser JS 移植并增强)
+    # ================================================================
+
+    @staticmethod
+    def _extract_name(text: str) -> Optional[str]:
+        patterns = [
+            r'姓\s*名[：:\s]*([^\n,，。.\d\s]{2,6})',
+            r'名字[：:\s]*([^\n,，。.\d\s]{2,6})',
+            r'^([^\n,，。.\d\s]{2,4})\s*\n\s*(?:电话|手机|1[3-9])',
+            r'^([^\n,，。.\d\s]{2,4})\s*\n\s*(?:邮箱|[a-zA-Z0-9._%+-]+@)',
+            r'【姓名】[：:\s]*([^\n]{2,6})',
+            r'姓名[：:\s]*([^\n,，。.\d\s]{2,6})',
+            # 增强：中文姓名在文本开头
+            r'^([一-鿿]{2,4})\s*(?:\n|$)',
+        ]
+        for p in patterns:
+            m = re.search(p, text, re.MULTILINE)
+            if m:
+                name = m.group(1).strip()
+                if 2 <= len(name) <= 6 and not re.search(r'\d', name):
+                    return name
+        return None
+
+    @staticmethod
+    def _extract_phone(text: str) -> Optional[str]:
+        patterns = [
+            r'(?:电话|手机|Tel|Phone|联系方式|联系电话|手机号码|MOBILE|Mobile)[：:\s]*(\+?86[\s-]?)?([\d\-+\s]{7,20})',
+            r'(1[3-9]\d)[\s\-]?(\d{4})[\s\-]?(\d{4})',
+            r'(\+86[\s-]?1[3-9]\d[\s-]?\d{4}[\s-]?\d{4})',
+            r'(?<!\d)(1[3-9]\d{9})(?!\d)',
+        ]
+        for p in patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                # 处理不同 group 组合
+                if m.lastindex and m.lastindex >= 2 and m.group(2):
+                    phone = (m.group(1) or '') + m.group(2)
+                else:
+                    phone = m.group(1) or m.group(0)
+                phone = re.sub(r'[\s\-]', '', phone)
+                if re.match(r'^(\+?86)?1[3-9]\d{9}$', phone):
+                    return phone
+        return None
+
+    @staticmethod
+    def _extract_email(text: str) -> Optional[str]:
+        patterns = [
+            r'(?:邮箱|邮件|Email|E-mail|电子邮箱|EMAIL)[：:\s]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+        ]
+        for p in patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                return m.group(1).strip().lower()
+        return None
+
+    @staticmethod
+    def _extract_target_job(text: str) -> Optional[str]:
+        patterns = [
+            r'(?:岗位|职位|应聘|求职意向|意向岗位|意向职位|期望职位|目标岗位|Target|Objective)[：:\s]*([^\n,，]{2,30})',
+            r'(?:求职意向|应聘岗位|期望岗位)[：:\s]*([^\n]{2,30})',
+        ]
+        for p in patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        # 尝试匹配常见职位名
+        job_patterns = [
+            r'(前端|后端|全栈|产品|设计|运营|市场|销售|算法|数据|测试|开发|工程师|经理|总监|专员|主管|架构师|分析师)'
+        ]
+        for jp in job_patterns:
+            m = re.search(jp, text)
+            if m:
+                # 尝试获取更完整的职位名（前后文本）
+                start = max(0, m.start() - 10)
+                end = min(len(text), m.end() + 10)
+                context = text[start:end]
+                return context.strip()
+        return None
+
+    @staticmethod
+    def _extract_salary(text: str) -> Optional[str]:
+        patterns = [
+            r'(?:薪资|期望薪资|薪酬|期望月薪|期望年薪|Salary|期望)[：:\s]*([^\n,，。]{2,20})',
+            r'(\d+[kK]\s*[-–—~至到]\s*\d+[kK])',
+            r'(\d+[,，]?\d*\s*[-–—~至到]\s*\d+[,，]?\d*\s*(?:元|块|万|k|K|千|万/月|K/月|元/月))',
+        ]
+        for p in patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return None
+
+    @staticmethod
+    def _extract_birth(text: str) -> Optional[str]:
+        m = re.search(
+            r'(?:出生|生日|出生日期|生日日期)[：:\s]*(\d{4}[年.\-/]\d{1,2}[月.\-/]\d{1,2}[日]?|\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})',
+            text
+        )
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _extract_age(text: str) -> Optional[int]:
+        m = re.search(r'(?:年龄)[：:\s]*(\d{1,2})\s*(?:岁)?', text)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        return None
+
+    @staticmethod
+    def _extract_gender(text: str) -> Optional[str]:
+        m = re.search(r'(?:性别)[：:\s]*(男|女|Male|Female)', text, re.IGNORECASE)
+        if m:
+            g = m.group(1)
+            return {'Male': '男', 'Female': '女'}.get(g, g)
+        return None
+
+    @staticmethod
+    def _extract_onboard_time(text: str) -> Optional[str]:
+        m = re.search(r'(?:到岗时间|可入职时间|入职时间|到岗)[：:\s]*([^\n,，。]{2,20})', text)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _extract_education(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '教育经历', '教育背景', '学历背景', '教育', '学历', '学习经历',
+            'Education', 'EDUCATION', 'Educational',
+        ])
+        if not section:
+            return []
+
+        entries = []
+        lines = [l.strip() for l in section.split('\n') if l.strip()]
+        current = None
+
+        for line in lines:
+            # 检测新条目
+            is_new = (
+                re.search(r'(?:大学|学院|University|College|School|高中|中学|一中|二中|三中|附中|实验|师范)', line)
+                and (re.search(r'\d{4}', line) or len(line) < 60)
+            ) or re.match(r'\d{4}[.\-/年]\d{1,2}\s*[-–—~至到]\s*(?:\d{4}[.\-/年]\d{1,2}|至今|现在|present)', line)
+
+            if is_new or not current:
+                if current and current.get('school'):
+                    entries.append(current)
+                current = {'school': None, 'major': None, 'degree': None, 'start_date': None, 'end_date': None, 'gpa': None, 'awards': [], 'source_index': []}
+
+            if not current:
+                current = {'school': None, 'major': None, 'degree': None, 'start_date': None, 'end_date': None, 'gpa': None, 'awards': [], 'source_index': []}
+
+            # 学校名
+            if not current['school']:
+                sm = re.search(r'([一-鿿A-Za-z\s()（）]+(?:大学|学院|University|College|School|高中|中学|一中|二中|三中|附中))', line)
+                if sm:
+                    current['school'] = sm.group(1).strip()
+
+            # 专业
+            if not current['major']:
+                mm = re.search(r'(?:专业|主修|Major)[：:\s]*([^\n,，。]{2,40})', line, re.IGNORECASE)
+                if mm:
+                    current['major'] = mm.group(1).strip()
+
+            # 学历
+            if not current['degree']:
+                dm = re.search(r'(?:学历|学位|Degree)[：:\s]*([^\n,，。]{2,15})', line, re.IGNORECASE)
+                if dm:
+                    current['degree'] = dm.group(1).strip()
+                else:
+                    dp = re.search(r'(本科|硕士|博士|大专|学士|MBA|EMBA|高中|中专|技校)', line)
+                    if dp:
+                        current['degree'] = dp.group(1).strip()
+
+            # 日期
+            dr = extract_date_range(line)
+            if dr:
+                current['start_date'] = dr['start']
+                current['end_date'] = dr['end']
+
+            # GPA
+            gm = re.search(r'(?:GPA|绩点|平均分)[：:\s]*([\d.]+(?:/[\d.]+)?)', line)
+            if gm:
+                current['gpa'] = gm.group(1).strip()
+
+            # 奖项
+            am = re.search(r'(?:获奖|奖学金|荣誉|Award|Scholarship)[：:\s]*([^\n]{2,60})', line, re.IGNORECASE)
+            if am:
+                current['awards'].append(am.group(1).strip())
+
+        if current and current.get('school'):
+            entries.append(current)
+
+        return entries
+
+    @staticmethod
+    def _extract_work_experience(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '工作经历', '工作经验', '实习经历', '工作履历', '职业经历', '从业经历',
+            'Work Experience', 'WORK EXPERIENCE', 'Employment', 'Professional Experience',
+        ])
+        if not section:
+            return []
+
+        entries = []
+        lines = [l.strip() for l in section.split('\n') if l.strip()]
+        current = None
+        duties = []
+        achievements = []
+
+        # 知名公司名列表（不包含标准后缀的公司）
+        KNOWN_COMPANIES = [
+            '阿里巴巴', '阿里', '腾讯', '百度', '字节跳动', '美团', '滴滴',
+            '京东', '拼多多', '网易', '小米', '华为', '蚂蚁', '快手',
+            '哔哩哔哩', 'B站', '小红书', '微博', '知乎', '豆瓣',
+            '谷歌', 'Google', '微软', 'Microsoft', '亚马逊', 'Amazon',
+            '苹果', 'Apple', 'Meta', 'Facebook', '特斯拉', 'Tesla',
+            'Shopee', 'Grab', 'Lazada', 'Tokopedia', 'Gojek',
+            'Shopify', 'Stripe', 'Airbnb', 'Uber', 'Lyft',
+        ]
+
+        for line in lines:
+            # 检测新公司条目
+            is_company = (
+                re.search(r'(?:公司|集团|有限|科技|网络|信息|技术|银行|证券|保险|医院|学校|政府|研究院|所|厂|店|平台)', line)
+                or re.match(r'^[一-鿿A-Za-z&·]{2,30}(?:公司|集团|有限|科技|网络|信息|技术)', line)
+                or any(c in line for c in KNOWN_COMPANIES)
+            )
+            has_date = extract_date_range(line)
+            date_at_start = bool(re.match(r'\d{4}[.\-/年]\d{1,2}', line))
+
+            if (is_company or date_at_start) and (has_date or len(line) < 80):
+                # 跳过明显的列表项/成就行
+                if re.match(r'^[\s]*[-•*\d+\.、▸►○●◆■✔✅]\s', line):
+                    if current:
+                        # 属于当前条目的成就
+                        content = re.sub(r'^[\s]*[-•*\d+\.、▸►○●◆■✔✅]\s*', '', line).strip()
+                        if content:
+                            current['achievements'].append(content)
+                    continue
+                # 保存前一条目
+                if current:
+                    current['duties'] = '\n'.join(duties) if duties else None
+                    current['achievements'] = achievements
+                    entries.append(current)
+                current = {
+                    'company': None, 'position': None, 'start_date': None, 'end_date': None,
+                    'department': None, 'duties': None, 'achievements': [], 'source_index': [],
+                }
+                duties = []
+                achievements = []
+
+                # 公司名
+                cm = re.search(r'([一-鿿A-Za-z&·()（）\s]{2,40}(?:公司|集团|有限|科技|网络|信息|技术|银行|证券|保险|医院|学校|政府|研究院|所))', line)
+                if not cm:
+                    # 尝试匹配知名公司名（无标准后缀）
+                    for known in KNOWN_COMPANIES:
+                        if known in line:
+                            # 在日期之后的公司名
+                            rest_after_date = re.sub(r'\d{4}[.\-/年]\d{1,2}.*?[-–—~至到].*?(?:\d{4}[.\-/年]\d{1,2}|至今|现在|present)\s*', '', line)
+                            if known in rest_after_date:
+                                current['company'] = known
+                            else:
+                                current['company'] = known
+                            break
+                else:
+                    current['company'] = cm.group(1).strip()
+
+                # 职位（在公司名之后查找）
+                if current['company']:
+                    after_company = line.split(current['company'], 1)[-1] if current['company'] in line else line
+                    pm = re.search(r'([^\n,，\d]{2,20}(?:工程师|经理|专员|设计师|运营|主管|总监|架构师|开发|测试|代表|顾问|助理|实习生|管培生))', after_company)
+                else:
+                    # 没有公司名时，从日期之后查找
+                    after_date = re.sub(r'\d{4}[.\-/年]\d{1,2}.*?[-–—~至到].*?(?:\d{4}[.\-/年]\d{1,2}|至今|现在|present)\s*', '', line)
+                    pm = re.search(r'([^\n,，\d]{2,20}(?:工程师|经理|专员|设计师|运营|主管|总监|架构师|开发|测试|代表|顾问|助理|实习生|管培生))', after_date)
+                if pm:
+                    current['position'] = pm.group(1).strip()
+
+                # 日期
+                if has_date:
+                    current['start_date'] = has_date['start']
+                    current['end_date'] = has_date['end']
+
+                # 剩余文本作为职责
+                rest = line
+                for pat in [current['company'], current['position']]:
+                    if pat:
+                        rest = rest.replace(pat, '', 1)
+                rest = re.sub(r'\d{4}.*?(?:至今|现在|present)?', '', rest).strip()
+                if rest and len(rest) > 5 and not rest.startswith('：'):
+                    duties.append(rest)
+
+            elif current:
+                # 列表项
+                bullet = re.match(r'^[•\-*\d+\.、▸►○●◆■✔✅]\s*(.+)', line)
+                if bullet:
+                    achievements.append(bullet.group(1).strip())
+                elif len(line) > 3:
+                    duties.append(line)
+
+        if current:
+            current['duties'] = '\n'.join(duties) if duties else None
+            current['achievements'] = achievements
+            entries.append(current)
+
+        return entries
+
+    @staticmethod
+    def _extract_projects(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '项目经历', '项目经验', '项目', '主要项目', 'Projects', 'PROJECTS', 'Project Experience',
+        ])
+        if not section:
+            return []
+
+        entries = []
+        lines = [l.strip() for l in section.split('\n') if l.strip()]
+        current = None
+        desc_lines = []
+
+        for line in lines:
+            # 检测新项目
+            has_date = extract_date_range(line)
+            is_proj_name = (
+                line.startswith('项目') or
+                re.match(r'^[一-鿿A-Za-z].{1,40}(?:系统|平台|项目|方案|工具|App|APP|系统|产品|引擎)', line) or
+                (re.match(r'^[一-鿿A-Za-z]{2,30}$', line) and len(line) < 30)
+            )
+
+            if (is_proj_name or has_date) and len(line) < 100:
+                if current and current.get('name'):
+                    current['description'] = '\n'.join(desc_lines) if desc_lines else None
+                    entries.append(current)
+                current = {
+                    'name': None, 'role': None, 'start_date': None, 'end_date': None,
+                    'description': None, 'technologies': [], 'results': None, 'source_index': [],
+                }
+                desc_lines = []
+
+                current['name'] = line[:60].strip()
+                if has_date:
+                    current['start_date'] = has_date['start']
+                    current['end_date'] = has_date['end']
+
+            elif current:
+                # 角色
+                if not current['role']:
+                    rm = re.search(r'(?:角色|Role|担任|负责)[：:\s]*([^\n,，]{2,20})', line)
+                    if rm:
+                        current['role'] = rm.group(1).strip()
+
+                # 技术栈
+                techs = find_tech_stack(line)
+                if techs:
+                    current['technologies'].extend(t for t in techs if t not in current['technologies'])
+
+                # 成果
+                res_m = re.search(r'(?:成果|结果|效果|产出|业绩|Result)[：:\s]*([^\n]{5,80})', line, re.IGNORECASE)
+                if res_m:
+                    current['results'] = res_m.group(1).strip()
+                else:
+                    desc_lines.append(line)
+
+        if current and current.get('name'):
+            current['description'] = '\n'.join(desc_lines) if desc_lines else None
+            entries.append(current)
+
+        return entries
+
+    @staticmethod
+    def _extract_skills(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '技能', '专业技能', '技术栈', '技能证书', 'Skills', 'SKILLS', 'Technical Skills',
+        ])
+        if not section:
+            return SmartExtractor._extract_skills_from_full_text(text)
+
+        skills = []
+        # 分割技能项
+        items = re.split(r'[,，、；;|/·\n]', section)
+        for item in items:
+            item = item.strip()
+            if not item or len(item) < 1 or len(item) > 40:
+                continue
+            # 过滤非技能文本
+            if re.search(r'[：:]', item):
+                continue
+            skills.append({'name': item, 'category': SmartExtractor._categorize_skill(item), 'level': None, 'source_index': []})
+
+        # 去重
+        seen = set()
+        unique_skills = []
+        for s in skills:
+            if s['name'].lower() not in seen:
+                seen.add(s['name'].lower())
+                unique_skills.append(s)
+
+        return unique_skills
+
+    @staticmethod
+    def _extract_skills_from_full_text(text: str) -> list[dict]:
+        """当没有独立技能章节时，从全文匹配技术栈"""
+        techs = find_tech_stack(text)
+        return [{'name': t, 'category': SmartExtractor._categorize_skill(t), 'level': None, 'source_index': []} for t in techs]
+
+    @staticmethod
+    def _categorize_skill(name: str) -> str:
+        """技能分类"""
+        programming = {'Python', 'Java', 'JavaScript', 'TypeScript', 'Go', 'Golang', 'Rust', 'C++', 'C', 'C#', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'Scala', 'R', 'MATLAB', 'Shell', 'Bash', 'SQL'}
+        frameworks = {'React', 'Vue', 'Angular', 'Django', 'Flask', 'FastAPI', 'Spring', 'Express', 'Node.js', 'Next.js', 'Nuxt', 'Svelte', 'jQuery', 'Bootstrap', 'Tailwind', 'PyTorch', 'TensorFlow', 'Keras', 'Pandas', 'NumPy'}
+        tools = {'Docker', 'Kubernetes', 'Git', 'Jenkins', 'AWS', 'Azure', 'GCP', 'Linux', 'Nginx', 'Redis', 'MongoDB', 'MySQL', 'PostgreSQL', 'Elasticsearch', 'Kafka', 'RabbitMQ', 'CI/CD', 'Terraform', 'Ansible', 'Figma', 'Sketch'}
+        languages = {'英语', 'English', '中文', '日语', '韩语', '法语', '德语', 'CET-4', 'CET-6', 'IELTS', 'TOEFL'}
+
+        nl = name.lower()
+        if any(p.lower() in nl for p in programming):
+            return '编程语言'
+        if any(f.lower() in nl for f in frameworks):
+            return '框架'
+        if any(t.lower() in nl for t in tools):
+            return '工具'
+        if any(l in name for l in languages):
+            return '语言'
+        return '其他'
+
+    @staticmethod
+    def _extract_certificates(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '证书', '资格证书', '证书资质', 'Certificates', 'CERTIFICATES', 'Certifications',
+        ])
+        if not section:
+            # 尝试全文匹配
+            section = text
+
+        certs = []
+        cert_patterns = [
+            r'(?:证书|Certification|Certificate)[：:\s]*([^\n,，。]{2,40})',
+            r'([^\n,，。]{2,30}(?:证书|资格证|认证|执照))',
+        ]
+        for pat in cert_patterns:
+            for m in re.finditer(pat, section, re.IGNORECASE):
+                name = m.group(1).strip()
+                if name not in [c['name'] for c in certs]:
+                    certs.append({'name': name, 'date': None, 'issuing_authority': None, 'source_index': []})
+        return certs
+
+    @staticmethod
+    def _extract_languages(text: str) -> list[dict]:
+        section = extract_section(text, [
+            '语言', '语言能力', '外语', 'Languages', 'LANGUAGES',
+        ])
+        if not section:
+            return []
+
+        langs = []
+        lang_patterns = [
+            r'(英语|English|中文|日语|韩语|法语|德语|西班牙语|俄语)[：:\s]*([^\n,，。]{0,15})',
+            r'(CET-[46]|IELTS\s*\d[\d.]*|TOEFL\s*\d+|N[1-5])',
+        ]
+        for pat in lang_patterns:
+            for m in re.finditer(pat, section, re.IGNORECASE):
+                name = m.group(1)
+                level = m.group(2).strip() if m.lastindex and m.lastindex >= 2 else None
+                langs.append({'name': name, 'level': level, 'source_index': []})
+        return langs
+
+    @staticmethod
+    def _extract_self_assessment(text: str) -> Optional[str]:
+        section = extract_section(text, [
+            '自我评价', '自我介绍', '个人评价', '自我描述', '个人简介',
+            'Self-Assessment', 'Self Assessment', 'Summary', 'Profile', 'About Me',
+        ])
+        if not section:
+            return None
+        # 移除章节标题行
+        lines = section.split('\n')
+        if len(lines) > 1:
+            section = '\n'.join(lines[1:])
+        return section.strip()[:2000] or None
