@@ -668,11 +668,9 @@ const App = (() => {
     if (!extractBtn) return;
 
     extractBtn.addEventListener('click', async () => {
-      // === Collect input: check file upload first, then text ===
       let fileToProcess = null;
       let textToProcess = '';
 
-      // Check if there's a file in the file/image upload area
       const fileInput = document.getElementById('personal-file-input');
       const imageInput = document.getElementById('personal-image-input');
 
@@ -688,13 +686,11 @@ const App = (() => {
         textToProcess = document.getElementById('personal-free-text')?.value?.trim() || '';
       }
 
-      // If no file and no text, look for text area fallback
       if (!fileToProcess && !textToProcess) {
         showToast('请先输入文字、粘贴内容或上传文件', 'warning');
         return;
       }
 
-      // === Run extraction pipeline ===
       extractBtn.textContent = '⏳ 提取中...';
       extractBtn.disabled = true;
 
@@ -702,7 +698,7 @@ const App = (() => {
       const logContainer = document.getElementById('extraction-progress');
       if (logContainer) {
         logContainer.classList.remove('hidden');
-        logContainer.innerHTML = '<div class="extraction-progress-title">🔍 正在执行提取流水线...</div>';
+        logContainer.innerHTML = '<div class="extraction-progress-title">🔍 全链路提取流水线</div>';
       }
 
       const logProgress = (msg) => {
@@ -713,76 +709,48 @@ const App = (() => {
           logContainer.appendChild(entry);
           logContainer.scrollTop = logContainer.scrollHeight;
         }
-        console.log('[Extraction]', msg);
       };
 
-      // === 优先使用后端 API（如果可用） ===
-      let pipelineResult;
-      if (window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
-        try {
-          logProgress('🚀 使用后端提取引擎 (SmartResume → LLM → Regex)...');
-          const backendFile = fileToProcess || new File([textToProcess], 'input.txt', { type: 'text/plain' });
-          const parsed = await BackendAPI.parseFile(backendFile, { lang: I18N.getLang(), fallback: false });
-          if (parsed.success && parsed.markdown) {
-            const extracted = await BackendAPI.extractResume(parsed.markdown, { lang: I18N.getLang(), fallback: false });
-            if (extracted.success || extracted.basic_info) {
-              pipelineResult = { ...extracted, log: [] };
-              logProgress('✅ 后端提取完成: method=' + (extracted.method || '?') + ', confidence=' + (extracted.confidence || '?'));
-            }
-          }
-        } catch (e) { console.warn('[App] Backend extract failed, falling back:', e.message); }
-      }
-      if (!pipelineResult) {
-        logProgress('🖥️ 使用浏览器端提取引擎...');
-        pipelineResult = await ExtractionPipeline.runFullPipeline(
-          fileToProcess || new File([textToProcess], 'input.txt', { type: 'text/plain' }),
-          {
-            lang: I18N.getLang(),
-            onProgress: (info) => {
-              if (logContainer) {
-                const existing = logContainer.querySelector('.pipeline-logs') || document.createElement('div');
-                if (!existing.classList.contains('pipeline-logs')) {
-                  existing.className = 'pipeline-logs';
-                  logContainer.appendChild(existing);
-                }
-                const entry = document.createElement('div');
-                entry.className = `pipeline-log-entry pipeline-log-${info.type || 'info'}`;
-                entry.textContent = info.stage;
-                existing.appendChild(entry);
-                existing.scrollTop = existing.scrollHeight;
-              }
-            }
-          },
-      );
-    } // end if (!pipelineResult)
+      try {
+        // === 使用 PipelineCoordinator 统一流水线 ===
+        const input = fileToProcess || textToProcess;
+        const pipelineResult = await PipelineCoordinator.runExtractionPipeline(input, {
+          lang: I18N.getLang(),
+          onProgress: (info) => logProgress(`[${info.step || info.stage}] ${info.msg || info.stage}`),
+        });
 
-      // === Handle Result ===
-      if (pipelineResult.success && pipelineResult.data) {
-        const data = pipelineResult.data;
-        const validation = pipelineResult.validation;
+        if (pipelineResult.success) {
+          const data = pipelineResult.extractedData;
+          const validation = pipelineResult.validation;
 
-        // Populate form fields from extracted data
-        populateFormFromExtracted(data);
+          // 表单回填
+          populateFormFromExtracted(data);
 
-        // Show validation summary
-        if (validation) {
-          const missingCount = (validation.missingFields?.length || 0) + (validation.emptySections?.length || 0);
-          if (missingCount > 0) {
+          // 校验摘要
+          if (validation?.issues?.length) {
             showMissingFieldsIndicator(validation);
           }
+
+          // 打印日志
+          (pipelineResult.logs || []).forEach(l => logProgress(l.msg));
+
+          const bi = data.basic_info || {};
+          showToast(
+            `✅ 提取完成 | ${bi.name || '?'} | ${data.education?.length || 0}教育 ${data.work_experience?.length || 0}工作 ${data.projects?.length || 0}项目 ${data.skills?.length || 0}技能 | method=${pipelineResult.method}`,
+            'success'
+          );
+
+          // 刷新预览
+          collectAllFormData();
+          if (state.jdText) handleGenerateResume();
+          updatePreview();
+        } else {
+          showToast('提取失败: ' + (pipelineResult.error || '未知错误'), 'error');
         }
-
-        showToast(
-          `✅ 提取完成：${data.education?.length || 0}段教育 · ${data.work_experience?.length || 0}段工作 · ${data.projects?.length || 0}个项目 · ${data.skills?.length || 0}项技能`,
-          'success'
-        );
-
-        // Refresh previews
-        collectAllFormData();
-        if (state.jdText) handleGenerateResume();
-        updatePreview();
-      } else {
-        showToast('提取失败: ' + (pipelineResult.error || '未知错误'), 'error');
+      } catch (e) {
+        console.error('[Extraction] Fatal error:', e);
+        logProgress('❌ 流水线中断: ' + e.message);
+        showToast('提取失败: ' + e.message, 'error');
       }
 
       extractBtn.textContent = '🤖 AI自动提取个人信息';
@@ -970,55 +938,79 @@ const App = (() => {
     window.addEventListener('langchange', () => updatePreview());
   }
 
-  function handleGenerateResume() {
+  async function handleGenerateResume() {
     collectAllFormData();
     if (!state.jdText && !state.formData.name && MaterialStore.getAIContext().length < 20) {
       showToast('请先输入JD或上传简历文件', 'warning');
       return;
     }
 
-    // === Lock material store (prevent further modifications during generation) ===
+    // === Lock material store ===
     MaterialStore.lock();
 
-    showLoading('AI正在生成简历...\n校验素材真实性...');
-    if (!state.jdKeywords) state.jdKeywords = ResumeEngine.parseJD(state.jdText);
+    showLoading('AI正在生成简历...');
 
-    setTimeout(() => {
-      state.resumeData = ResumeEngine.generateResume(state.formData, state.jdKeywords, state.questionnaireAnswers);
+    try {
+      if (!state.jdKeywords) state.jdKeywords = ResumeEngine.parseJD(state.jdText);
 
-      // === Check for blocked (hallucination detected) ===
-      if (state.resumeData._blocked) {
+      // 从 MaterialStore 获取已校验的提取数据
+      const extractedData = {
+        basic_info: {
+          name: MaterialStore.getIdentity('name') || state.formData.name,
+          phone: MaterialStore.getIdentity('phone') || state.formData.phone,
+          email: MaterialStore.getIdentity('email') || state.formData.email,
+          city: MaterialStore.getIdentity('city') || state.formData.city,
+          target_job: MaterialStore.getIdentity('targetJob') || state.formData.jobTitle,
+          expect_salary: MaterialStore.getIdentity('salary') || state.formData.salary,
+        },
+        education: MaterialStore.getEducation(),
+        work_experience: MaterialStore.getWorkExperience(),
+        projects: MaterialStore.getProjects(),
+        skills: MaterialStore.getSkills(),
+        certificates: MaterialStore.getCertificates(),
+      };
+
+      // === 使用 PipelineCoordinator 生成简历 ===
+      const genResult = await PipelineCoordinator.runGenerationPipeline(
+        extractedData,
+        state.jdKeywords,
+        { lang: I18N.getLang(), useLLM: !!DeepSeekAPI.getApiKey() }
+      );
+
+      state.resumeData = genResult.resume;
+      state.selfIntro = genResult.selfIntro;
+
+      // 校验检查
+      const validation = state.resumeData._validation;
+      if (validation && validation.severity === 'block') {
         hideLoading();
         showHallucinationAlert(state.resumeData);
         MaterialStore.unlock();
         return;
       }
-
-      // === Check for warnings ===
-      const validation = state.resumeData._validation;
       if (validation && validation.severity === 'warning') {
         showValidationBanner(validation);
       }
 
-      state.selfIntro = ResumeEngine.generateSelfIntro(state.resumeData, I18N.getLang());
       updatePreview();
       hideLoading();
 
-      if (validation && validation.stats) {
-        const lang = I18N.getLang();
-        showToast(
-          lang === 'zh'
-            ? `简历已生成 ✅${validation.stats.verified}项验证 ⚠️${validation.stats.uncertain}项存疑`
-            : `Resume generated ✅${validation.stats.verified} verified ⚠️${validation.stats.uncertain} uncertain`,
-          validation.stats.fabricated > 0 ? 'warning' : 'success'
-        );
-      } else {
-        showToast('简历已生成！', 'success');
-      }
+      const stats = validation?.stats;
+      showToast(
+        stats
+          ? `✅ 简历已生成 | ${stats.verified || 0}项验证 | 中英自我介绍 ${genResult.selfIntroMeta?.cn?.estimatedSeconds || '?'}s/${genResult.selfIntroMeta?.en?.estimatedSeconds || '?'}s`
+          : '✅ 简历已生成！',
+        validation?.severity === 'warning' ? 'warning' : 'success'
+      );
 
       const btn = document.getElementById('btn-generate-resume');
       if (btn) { const r = btn.getBoundingClientRect(); LiquidMetal.triggerBurst(r.left + r.width/2, r.top + r.height/2, 30); }
-    }, 1000);
+    } catch (e) {
+      console.error('[ResumeGen] Error:', e);
+      hideLoading();
+      showToast('简历生成失败: ' + e.message, 'error');
+      MaterialStore.unlock();
+    }
   }
 
   function collectAllFormData() {

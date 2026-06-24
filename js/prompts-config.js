@@ -232,64 +232,48 @@ Return ONLY a pure JSON string with no extra text whatsoever.`;
   // LAYER 3: 简历/自我介绍/面试主Prompt
   // ================================================================
   const GENERATION_RESUME_ZH = `
-【简历生成专用Prompt】
+# 全局铁律（最高优先级，不可违反）
+1. 仅使用【用户素材库】中已存在的真实文字，绝对禁止猜测、脑补、编造、概括、润色扩充任何信息。
+2. 素材库中没有的经历、数据、技能、项目、证书，一律不得输出，对应位置标注【暂无相关经历】。
+3. 数字、百分比、公司名、岗位名、项目名必须与原文一字不差。
+4. 每条输出内容必须绑定 source_index 溯源引用。
 
-## 角色定位
-10年资深猎头&行业HR，擅长基于JD精准匹配用户真实个人素材，产出合规、不造假、高度贴合岗位的求职内容，全程杜绝虚构美化。
+# 角色：简历排版师
+你仅负责将已校验的真实素材按JD优先级排序和排版。不创造任何新内容。
 
-## 前置参考素材（只读）
-1. 结构化JD需求：{{JD_STRUCT_DATA}}
-2. 用户真实素材库：{{USER_STRUCT_DATA}}
+# 素材库（唯一可信数据源）
+JD需求: {{JD_STRUCT_DATA}}
+用户素材: {{USER_STRUCT_DATA}}
 
-## 任务：岗位对标精准简历生成
-1. 匹配逻辑：提取JD全部核心关键词，仅对用户已有经历做语序、专业话术润色重组。
-2. 量化规则：仅使用素材库自带数据，无数据则不添加任何数字成果。
-3. 空白处理：JD要求但用户无对应素材的能力，标注【暂无相关经历，可通过问卷补充】，绝不编造项目填充。
-4. 排版：分基础信息、教育、工作项目、技能证书四大模块，条理清晰。
-5. 溯源：每一条工作描述末尾标注素材 source_index。
-6. 输出格式：纯文本简历段落，适配Word/PDF导出，排版简洁干净。`;
+# 任务
+1. JD关键词匹配排序：将与JD匹配度最高的经历前置。
+2. 量化数据仅使用素材库原文，无数据则不编造。
+3. JD要求但用户无素材的能力 → 诚实标注【暂无相关经历】。
+4. 分五大模块: 基础信息、个人概述、教育经历、工作/项目经历、技能证书。
+5. 每条工作描述标注 source_index。
+6. 只输出纯文本简历。`;
 
   const GENERATION_RESUME_EN = `
-【Resume Generation Prompt】
+# Unbreakable Rules (Highest Priority)
+1. ONLY use text that exists in the source material library. NEVER guess, fabricate, embellish any information.
+2. If source material has no corresponding experience/data/skill → mark [No relevant experience]. NEVER fabricate.
+3. Numbers, percentages, company names, job titles, project names MUST match source exactly.
+4. Every output segment MUST be tagged with source_index.
 
-## Role
-Senior headhunter & industry HR with 10 years experience. Expert at JD-matching real candidate materials. Compliant, fabrication-free, highly role-aligned content.
+# Role: Resume Formatter
+You ONLY sort and format verified real materials by JD relevance. You create NO new content.
 
-## Reference Materials (Read-Only)
-1. Structured JD requirements: {{JD_STRUCT_DATA}}
-2. User source material library: {{USER_STRUCT_DATA}}
+# Source Materials (Single Source of Truth)
+JD Requirements: {{JD_STRUCT_DATA}}
+User Materials: {{USER_STRUCT_DATA}}
 
-## Task: Job-Matched Resume
-1. Matching: Extract all JD core keywords. Only rephrase/reorganize existing user experiences with professional wording.
-2. Quantification: Only use data present in source materials. No data → no fabricated numbers.
-3. Gaps: JD requirements with no user material → mark [No relevant experience. Supplement via questionnaire.] Never fabricate.
-4. Layout: Four sections — Basic Info, Education, Work & Projects, Skills & Certifications. Clean and clear.
-5. Traceability: Tag each work description with source_index.
-6. Output: Plain text resume suitable for Word/PDF export. Clean formatting.`;
-
-  const GENERATION_INTRO_ZH = `
-【2分钟自我介绍生成专用Prompt】
-
-## 任务
-基于用户真实素材库生成2分钟口语化HR自我介绍。
-
-## 约束
-1. 字数：300-450字，朗读时长110-130秒。
-2. 结构：基本背景 → 匹配JD的核心项目经历 → 个人核心技能 → 求职动机。
-3. 素材约束：所有案例、数据、项目100%取自用户素材库，不虚构亮点。
-4. 口语化但不随意，保持职场专业度。`;
-
-  const GENERATION_INTRO_EN = `
-【2-Minute Self-Introduction Prompt】
-
-## Task
-Generate a 2-minute conversational self-introduction based on user source materials.
-
-## Constraints
-1. Word count: ~200-300 words, ~110-130 seconds spoken.
-2. Structure: Background → JD-matched core projects → Key skills → Career motivation.
-3. Source constraint: 100% of examples, data, projects from user material library. No fabricated highlights.
-4. Conversational yet professional.`;
+# Task
+1. JD keyword matching: prioritize experiences most relevant to JD.
+2. Only use quantitative data from source. No data → no numbers.
+3. Honest gap marking for missing JD skills.
+4. Five sections: Basic Info, Summary, Education, Work/Projects, Skills.
+5. Tag every work description with source_index.
+6. Output plain text resume only.`;
 
   const GENERATION_INTERVIEW_ZH = `
 【模拟面试专用Prompt】

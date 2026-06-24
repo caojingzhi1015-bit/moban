@@ -319,6 +319,42 @@ const MaterialStore = (() => {
   // === Export for debugging ===
   function dump() { return JSON.parse(JSON.stringify(store)); }
 
+  // === 从提取结果批量导入 ===
+  function loadFromExtraction(extractedData, fileName) {
+    if (materialLocked) return false;
+    return importParsedData(extractedData, fileName);
+  }
+
+  // === 获取素材锁定状态 ===
+  function isMaterialLocked() { return materialLocked; }
+
+  // === 获取溯源映射（字段 → 原文行） ===
+  function getSourceMap() {
+    const map = {};
+    const addEntry = (key, entry) => {
+      if (!entry) return;
+      const src = entry.source || (entry.sources && entry.sources[0]);
+      if (src) {
+        if (!map[key]) map[key] = [];
+        map[key].push({ id: src.id, file: src.file, section: src.section, snippet: src.text_snippet || '' });
+      }
+    };
+
+    addEntry('name', store.identity.name);
+    addEntry('phone', store.identity.phone);
+    addEntry('email', store.identity.email);
+    addEntry('city', store.identity.city);
+    addEntry('target_job', store.identity.targetJob);
+
+    store.education.forEach((e, i) => addEntry(`education_${i}`, e));
+    store.workExperience.forEach((w, i) => addEntry(`work_${i}`, w));
+    store.projects.forEach((p, i) => addEntry(`project_${i}`, p));
+    store.skills.forEach((s, i) => addEntry(`skill_${i}`, s));
+    store.certificates.forEach((c, i) => addEntry(`cert_${i}`, c));
+
+    return map;
+  }
+
   return {
     // Identity
     setIdentity, getIdentity,
@@ -341,11 +377,11 @@ const MaterialStore = (() => {
     // Source files
     addSourceFile, getSourceFiles,
     // Bulk import
-    importParsedData, importJDParsedData,
+    importParsedData, importJDParsedData, loadFromExtraction,
     // Lock
-    lock, unlock, isLocked,
+    lock, unlock, isLocked, isMaterialLocked,
     // Context & Sources
-    getAIContext, getAllSources,
+    getAIContext, getAllSources, getSourceMap,
     // Lifecycle
     reset, dump,
   };
