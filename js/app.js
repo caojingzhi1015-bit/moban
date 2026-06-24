@@ -183,11 +183,13 @@ const App = (() => {
   function bindImageUploads() {
     setupImageUpload('jd', (data) => {
       state.jdImageData = data;
-      // Show preview
       const previewEl = document.getElementById('jd-image-preview');
       previewEl.innerHTML = `<div class="image-preview-container">
         <img src="${data.dataURL}" class="image-preview" alt="JD Image">
-        <button class="image-preview-remove" id="jd-preview-remove">✕</button>
+        <div class="image-preview-actions">
+          <button class="image-preview-remove" id="jd-preview-remove">✕</button>
+          <button class="image-preview-reocr" id="jd-preview-reocr">🔄 重新识别</button>
+        </div>
       </div>`;
       previewEl.classList.remove('hidden');
       document.getElementById('jd-image-text').classList.remove('hidden');
@@ -196,7 +198,13 @@ const App = (() => {
         document.getElementById('jd-image-text').classList.add('hidden');
         state.jdImageData = null;
       });
-      // Simulate OCR
+      document.getElementById('jd-preview-reocr').addEventListener('click', () => {
+        if (state.jdImageData?.dataURL) {
+          showToast('🔄 重新 OCR 识别中...', 'info');
+          performImageOCR(state.jdImageData.dataURL, 'jd-image-text', 'JD');
+        }
+      });
+      // 真实 OCR 识别
       performImageOCR(data.dataURL, 'jd-image-text', 'JD');
     });
 
@@ -205,7 +213,10 @@ const App = (() => {
       const previewEl = document.getElementById('personal-image-preview');
       previewEl.innerHTML = `<div class="image-preview-container">
         <img src="${data.dataURL}" class="image-preview" alt="Resume Image">
-        <button class="image-preview-remove" id="personal-preview-remove">✕</button>
+        <div class="image-preview-actions">
+          <button class="image-preview-remove" id="personal-preview-remove">✕</button>
+          <button class="image-preview-reocr" id="personal-preview-reocr">🔄 重新识别</button>
+        </div>
       </div>`;
       previewEl.classList.remove('hidden');
       document.getElementById('personal-image-text').classList.remove('hidden');
@@ -213,6 +224,12 @@ const App = (() => {
         previewEl.classList.add('hidden');
         document.getElementById('personal-image-text').classList.add('hidden');
         state.personalImageData = null;
+      });
+      document.getElementById('personal-preview-reocr').addEventListener('click', () => {
+        if (state.personalImageData?.dataURL) {
+          showToast('🔄 重新 OCR 识别中...', 'info');
+          performImageOCR(state.personalImageData.dataURL, 'personal-image-text', '简历');
+        }
       });
       performImageOCR(data.dataURL, 'personal-image-text', '简历');
     });
@@ -342,84 +359,103 @@ const App = (() => {
     });
   }
 
+  /**
+   * 统一文件解析入口 — 分流：图片→OCREngine, PDF→PDFParser, DOCX→PDFParser, TXT→直接读取
+   */
   function processUploadedFile(file, callback) {
-    showLoading('正在解析文件并提取文字...');
+    const ext = getFileExt(file.name);
+    const isImage = ['png','jpg','jpeg','webp','bmp','gif'].includes(ext);
+    const isPDF = ext === 'pdf';
+    const isDoc = ['docx','doc'].includes(ext);
+    const isTxt = ext === 'txt';
 
-    // 图片文件 → 优先用后端 VL OCR，其次浏览器端 DeepSeek-VL，最后 Tesseract.js
-    const isImage = ['png','jpg','jpeg','webp','bmp','gif'].includes(getFileExt(file.name));
-    const isPDF = getFileExt(file.name) === 'pdf';
+    const toastMsg = isImage ? '正在 OCR 识别图片文字...' :
+      isPDF ? '正在解析 PDF 文档...' :
+      isDoc ? '正在解析 Word 文档...' : '正在读取文件...';
+    showLoading(toastMsg);
 
-    // 图片文件 + 后端可用 → 用后端 parse 接口（后端内部调 VL OCR）
-    if (isImage && window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
-      BackendAPI.parseFile(file, { lang: I18N.getLang() }).then(result => {
+    // === 分支1: 图片 → OCREngine (Backend→PaddleOCR-Wasm→Tesseract) ===
+    if (isImage) {
+      OCREngine.recognize(file, {
+        lang: I18N.getLang(),
+        onProgress: (info) => {
+          const lt = document.getElementById('loading-text');
+          if (lt) {
+            const stageMap = { backend: '后端 OCR', paddleocr: 'PaddleOCR', tesseract: 'Tesseract', done: '识别完成' };
+            lt.textContent = `${stageMap[info.stage] || info.stage}... ${info.progress || 0}%`;
+          }
+        },
+      }).then(result => {
         hideLoading();
-        if (result.success && result.markdown) {
-          showToast('✅ 后端 VL OCR 识别完成', 'success');
+        if (result.success) {
+          const methodLabels = {
+            'backend-paddleocr': '后端PaddleOCR',
+            'paddleocr-wasm': '浏览器PaddleOCR-Wasm',
+            'tesseract.js': 'Tesseract.js',
+          };
+          showToast(`✅ ${methodLabels[result.method] || result.method} 识别完成`, 'success');
+          if (result.lowConfidenceLines?.length) {
+            showToast(`⚠️ ${result.lowConfidenceLines.length} 处文字模糊，建议重传清晰图片`, 'warning');
+          }
           callback({
             name: file.name, size: file.size, type: file.type,
-            extension: getFileExt(file.name), icon: getFileIconFor(file.name),
-            extractedText: result.markdown, method: 'backend-vl-ocr',
+            extension: ext, icon: getFileIconFor(file.name),
+            extractedText: result.fullText, method: result.method,
+            confidence: result.confidence, lines: result.lines,
           });
         } else {
-          // 后端失败 → 降级浏览器端
-          _parseFileLocal(file, callback);
+          showToast(result.error || 'OCR 失败', 'error');
+          callback({ name: file.name, size: file.size, type: file.type, extension: ext, icon: getFileIconFor(file.name), extractedText: '' });
         }
-      }).catch(() => _parseFileLocal(file, callback));
+      });
       return;
     }
 
-    _parseFileLocal(file, callback);
-  }
+    // === 分支2: PDF/DOCX → PDFParser (Backend MinerU→pdf.js增强) ===
+    if (isPDF || isDoc) {
+      PDFParser.parse(file, {
+        lang: I18N.getLang(),
+        onProgress: (info) => {
+          const lt = document.getElementById('loading-text');
+          if (lt) {
+            const stageMap = { backend: '后端解析', pdfjs: 'PDF.js 解析', docx: 'DOCX 解析', classify: '分章节+过滤', done: '解析完成' };
+            lt.textContent = `${stageMap[info.stage] || info.stage}... ${info.progress || 0}%`;
+          }
+        },
+      }).then(result => {
+        hideLoading();
+        if (result.success) {
+          const methodLabels = { 'mineru': 'MinerU解析', 'unstructured': 'Unstructured解析', 'pdfjs': 'PDF.js解析', 'pdfjs-scanned': 'PDF.js扫描件', 'docx_xml': 'DOCX解析' };
+          showToast(`✅ ${methodLabels[result.method] || result.method} 完成`, 'success');
+          if (result.isScanned) showToast('⚠️ 检测为扫描件PDF，OCR识别可能不完整', 'warning');
 
-  function _parseFileLocal(file, callback) {
-    showLoading('正在本地解析文件 (PDF.js/Tesseract/DeepSeek-VL)...');
-    const isImage = ['png','jpg','jpeg','webp','bmp','gif'].includes(getFileExt(file.name));
-    const isPDF = getFileExt(file.name) === 'pdf';
-
-    // 图片/PDF + DeepSeek API key → 用 DeepSeek-VL
-    const useDeepSeek = DeepSeekAPI.getApiKey() && (isImage || isPDF);
-    const parser = useDeepSeek ? DeepSeekFileParser : FileParser;
-
-    parser.parseFile(file, {
-      lang: I18N.getLang() === 'zh' ? 'chi_sim+eng' : 'eng',
-      onProgress: (info) => {
-        if (info.status === 'ocr_progress') {
-          const loadingText = document.getElementById('loading-text');
-          if (loadingText) loadingText.textContent = `OCR识别中... ${info.progress}%`;
+          callback({
+            name: file.name, size: file.size, type: file.type,
+            extension: ext, icon: getFileIconFor(file.name),
+            extractedText: result.markdown, method: result.method,
+            sections: result.sections, pageCount: result.pageCount,
+          });
+        } else {
+          showToast(result.error || 'PDF 解析失败', 'error');
+          callback({ name: file.name, size: file.size, type: file.type, extension: ext, icon: getFileIconFor(file.name), extractedText: '' });
         }
-      },
-    }).then(result => {
+      });
+      return;
+    }
+
+    // === 分支3: TXT/其他 → 直接读取 ===
+    file.text().then(text => {
       hideLoading();
-
-      if (!result.success) {
-        showToast(result.error || '文件解析失败', 'error');
-        callback({ name: file.name, size: file.size, type: file.type, extension: getFileExt(file.name), icon: getFileIconFor(file.name), extractedText: '' });
-        return;
-      }
-
-      // Show method used
-      const methodNote = result.method === 'pdf.js' ? ' (PDF.js解析)' :
-        result.method === 'tesseract.js' ? ` (OCR识别, 置信度${Math.round(result.confidence || 0)}%)` :
-        result.method === 'xml_extraction' ? ' (DOCX解析)' :
-        result.method === 'fallback' ? ' (基础提取，请核对)' : '';
-
-      showToast(`文件解析完成${methodNote}`, 'success');
-
+      showToast('✅ 文件读取完成', 'success');
       callback({
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        extension: getFileExt(file.name),
-        icon: getFileIconFor(file.name),
-        extractedText: result.fullText,
-        method: result.method,
-        confidence: result.confidence,
-        structured: result.structured,
+        name: file.name, size: file.size, type: file.type,
+        extension: ext, icon: getFileIconFor(file.name),
+        extractedText: text, method: 'plain_text',
       });
     }).catch(err => {
       hideLoading();
-      showToast('文件处理失败: ' + err.message, 'error');
-      callback({ name: file.name, size: file.size, type: file.type, extension: getFileExt(file.name), icon: getFileIconFor(file.name), extractedText: '' });
+      showToast('文件读取失败: ' + err.message, 'error');
+      callback({ name: file.name, size: file.size, type: file.type, extension: ext, icon: getFileIconFor(file.name), extractedText: '' });
     });
   }
 
@@ -516,68 +552,48 @@ const App = (() => {
   }
 
   /**
-   * 图片 VL OCR — 将图片 dataURL 发送到多模态模型识别文字，回填到输入框
-   *
-   * 流程（三级降级）：
-   * 1. 后端 API /api/parse（服务端调 VL OCR）
-   * 2. 浏览器端 DeepSeek-VL visionRecognition（API key 可配）
-   * 3. 提示用户手动输入（无可用 OCR 通道）
+   * 图片 OCR — 使用 OCREngine (Backend → PaddleOCR-Wasm → Tesseract.js) 识别文字并回填
    */
   async function performImageOCR(dataURL, textareaId, contentType) {
     const textarea = document.getElementById(textareaId);
     if (!textarea || !dataURL) return;
 
-    showLoading('AI 正在识别图片文字... (VL多模态)');
-    let ocrText = null;
-    let method = null;
+    showLoading('OCR 识别中...');
 
-    // === Level 1: 后端 API（服务端 VL OCR） ===
-    if (window.BackendAPI && window.BackendAPI.isBackendAvailable()) {
-      try {
-        const blob = dataURLtoBlob(dataURL);
-        const file = new File([blob], `image_${Date.now()}.png`, { type: 'image/png' });
-        const result = await BackendAPI.parseFile(file, { lang: I18N.getLang(), fallback: false });
-        if (result.success && result.markdown && result.markdown.length > 10) {
-          ocrText = result.markdown;
-          method = 'backend-vl-ocr';
-        }
-      } catch (e) { console.warn('[OCR] Backend VL failed:', e.message); }
-    }
-
-    // === Level 2: 浏览器端 DeepSeek-VL ===
-    if (!ocrText && window.DeepSeekAPI && DeepSeekAPI.getApiKey()) {
-      try {
-        const prompt = contentType === 'JD'
-          ? '你是一个精准的OCR识别工具。请严格识别并提取图片中的所有文字内容，保持原文格式和结构。完整提取岗位职责、任职要求、技能要求。数字、日期、百分比必须精确识别。不要添加任何不属于图片原文的内容。'
-          : '你是一个精准的OCR识别工具。请严格识别并提取图片中的所有文字内容，保持原文格式和结构。如果是简历：提取姓名、联系方式、教育经历、工作经历、项目经历、技能证书、自我评价。数字、日期、百分比必须精确识别，不能近似或编造。';
-        const result = await DeepSeekAPI.visionRecognition([dataURL], prompt);
-        if (result.success && result.content && result.content.length > 10) {
-          ocrText = result.content;
-          method = 'deepseek-vl';
-        }
-      } catch (e) { console.warn('[OCR] DeepSeek-VL failed:', e.message); }
-    }
+    const result = await OCREngine.recognize(dataURL, {
+      lang: I18N.getLang(),
+      onProgress: (info) => {
+        const lt = document.getElementById('loading-text');
+        if (lt) lt.textContent = `OCR: ${info.stage}... ${info.progress || 0}%`;
+      },
+    });
 
     hideLoading();
 
-    // === 回填文本框 ===
-    if (ocrText) {
-      textarea.value = ocrText;
+    if (result.success && result.fullText) {
+      textarea.value = result.fullText;
       textarea.focus();
-      showToast(`✅ ${method === 'backend-vl-ocr' ? '后端 VL OCR' : 'DeepSeek-VL'} 识别完成，请核对修改`, 'success');
-      // 如果文案里包含 "本地模拟" 则清除
-      if (textarea.value.includes('本地模拟')) {
-        textarea.value = textarea.value.replace(/.*本地模拟.*\n?/g, '');
+      const methodLabels = { 'backend-paddleocr': '后端PaddleOCR', 'paddleocr-wasm': 'PaddleOCR-Wasm', 'tesseract.js': 'Tesseract.js' };
+      showToast(`✅ ${methodLabels[result.method] || result.method} 识别完成，请核对修改`, 'success');
+
+      // 模糊文字提示
+      if (result.lowConfidenceLines?.length) {
+        setTimeout(() => showToast(`⚠️ ${result.lowConfidenceLines.length} 处文字模糊，建议重传清晰图片`, 'warning'), 2000);
+      }
+
+      // 更新素材库索引
+      if (window.MaterialStore && !window.MaterialStore.isMaterialLocked?.()) {
+        const indexedText = PDFParser.toIndexedText(result.fullText);
+        // 素材会在用户点击"提取"按钮时正式入库
       }
     } else {
-      // Level 3: 无可用的 OCR 通道
-      textarea.placeholder = 'OCR 通道不可用（后端未启动 + DeepSeek API Key 未配置）。\n请手动粘贴图片中的文字内容。\n也可以启动后端以获得自动 OCR 功能。';
+      textarea.placeholder = 'OCR 不可用。请：1) 启动后端服务  2) 等待 PaddleOCR-Wasm 加载  3) 或手动粘贴文字';
       textarea.focus();
-      showToast('⚠️ OCR 通道不可用，请手动输入图片文字', 'warning');
+      showToast('⚠️ 所有 OCR 通道均不可用，请手动输入或启动后端', 'warning');
     }
   }
 
-  /** data URL 转 Blob */
+  // dataURLtoBlob 保留用于其他地方
   function dataURLtoBlob(dataURL) {
     const parts = dataURL.split(',');
     const mime = parts[0].match(/:(.*?);/)[1];
