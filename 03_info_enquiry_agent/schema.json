@@ -1,0 +1,11 @@
+{
+  "questions": [
+    {
+      "category": "skill_gap|quant_data|project_detail|experience_gap",
+      "keyword": "string|null",
+      "question": "string",
+      "target_sections": ["string[]"],
+      "source": "jd|analysis"
+    }
+  ]
+}

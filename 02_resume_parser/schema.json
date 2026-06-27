@@ -1,0 +1,49 @@
+{
+  "base_info": {
+    "name": "string|null",
+    "phone": "string|null",
+    "email": "string|null",
+    "target_city": "string|null",
+    "target_position": "string|null",
+    "expected_salary": "string|null",
+    "available_onboard_time": "string|null",
+    "source_index": ["number[]"]
+  },
+  "education_list": [
+    {
+      "school_name": "string|null",
+      "major": "string|null",
+      "degree": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "scholarship_awards": ["string[]|null"],
+      "source_index": ["number[]"]
+    }
+  ],
+  "work_experience_list": [
+    {
+      "company": "string|null",
+      "position": "string|null",
+      "start_date": "string|null",
+      "end_date": "string|null",
+      "job_duty": "string|null",
+      "source_index": ["number[]"]
+    }
+  ],
+  "project_list": [
+    {
+      "project_name": "string|null",
+      "project_time": "string|null",
+      "responsibility": "string|null",
+      "project_data": "string|null",
+      "source_index": ["number[]"]
+    }
+  ],
+  "skill_certificate": {
+    "language_cert": ["string[]|null"],
+    "software_skill": ["string[]|null"],
+    "ai_tool_mastered": ["string[]|null"],
+    "other_cert": ["string[]|null"],
+    "source_index": ["number[]"]
+  }
+}

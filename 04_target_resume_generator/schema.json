@@ -1,0 +1,45 @@
+{
+  "resume": {
+    "personal": {
+      "name": "string",
+      "phone": "string",
+      "email": "string",
+      "city": "string",
+      "target_job": "string",
+      "salary": "string"
+    },
+    "summary": "string",
+    "experience": [
+      {
+        "company": "string",
+        "position": "string",
+        "period": "string",
+        "bullets": ["string[]"],
+        "jd_relevance": "高|中|低"
+      }
+    ],
+    "education": [
+      {
+        "school": "string",
+        "major": "string",
+        "degree": "string",
+        "period": "string"
+      }
+    ],
+    "skills": {
+      "technical": ["string[]"],
+      "languages": ["string[]"],
+      "certificates": ["string[]"],
+      "jd_matched": ["string[]"],
+      "jd_missing": ["string[]"]
+    },
+    "jd_gap": {
+      "matched": ["string[]"],
+      "missing": ["string[]"]
+    }
+  },
+  "self_intro": {
+    "zh": {"text": "string", "estimated_seconds": "number", "char_count": "number"},
+    "en": {"text": "string", "estimated_seconds": "number", "char_count": "number"}
+  }
+}

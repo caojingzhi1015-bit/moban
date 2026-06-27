@@ -1,0 +1,21 @@
+{
+  "interview_session": {
+    "persona": "hr|tech|stress|english",
+    "current_phase": "warmup|background|competency|stress|closing",
+    "question_count": "number",
+    "messages": [
+      {
+        "role": "user|assistant|system",
+        "content": "string"
+      }
+    ]
+  },
+  "evaluation_report": {
+    "job_match_score": "number(1-10)",
+    "competency_score": "number(1-10)",
+    "star_quality": "优秀|良好|一般|较差",
+    "risk_flags": ["string[]"],
+    "overall_assessment": "string",
+    "recommendation": "推荐录用|可考虑|不推荐"
+  }
+}

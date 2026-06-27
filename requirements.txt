@@ -1,0 +1,39 @@
+# CareerAI 求职助手 — 全部 Python 依赖
+# 安装: pip install -r requirements.txt
+# 已移除 MinerU (magic-pdf) — 云端编译环境缺失导致崩溃
+# 只保留纯 pip 安装即可稳定运行的库
+
+# === 网页框架 (必需) ===
+streamlit>=1.28.0          # Streamlit 瀑布流网页前端
+fastapi>=0.104.0           # FastAPI 后端服务
+uvicorn>=0.24.0            # ASGI 服务器
+
+# === HTTP & AI 网关 (必需) ===
+httpx>=0.27.0              # 异步 HTTP 客户端（多模型 API 调用）
+openai>=1.0.0              # OpenAI 兼容 SDK
+pydantic>=2.0.0            # 数据校验
+python-dotenv>=1.0.0       # 环境变量加载
+tenacity>=8.0.0            # 重试库
+
+# === PDF 文本提取 (必需，纯 pip，无编译依赖) ===
+pdfplumber>=0.11.0         # PDF 文本提取（主力，支持逐页+布局感知）
+PyPDF2>=3.0.0              # PDF 文本提取（回退方案）
+
+# === 文档解析 (可选，按需安装) ===
+python-docx>=1.1.0         # Word 文档解析 + 导出
+Pillow>=10.0.0             # 图片处理
+
+# === 图片 OCR (可选，按需安装) ===
+# 注意：PaddleOCR 在部分云端环境可能需要额外编译依赖。
+# 如果安装失败，系统会自动回退到 pytesseract（需系统安装 tesseract-ocr）。
+# PaddleOCR>=2.8.0
+# paddlepaddle>=3.0.0
+# pytesseract>=0.3.10
+
+# === Word/PDF 导出 (可选) ===
+# python-docx>=1.1.0        # Word 简历导出（已包含在上面）
+# reportlab>=4.0.0          # PDF 简历导出
+
+# === 开发 & 测试 ===
+# pytest>=8.0.0
+# pytest-asyncio>=0.24.0

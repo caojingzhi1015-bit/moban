@@ -1,0 +1,26 @@
+{
+  "position": "string|null",
+  "company": "string|null",
+  "location": "string|null",
+  "salary_range": "string|null",
+  "years_required": "string|null",
+  "education_required": "string|null",
+  "responsibilities": [
+    {
+      "text": "string",
+      "source_index": ["number[]"]
+    }
+  ],
+  "requirements": [
+    {
+      "text": "string",
+      "type": "hard_skill|soft_skill|education|experience|other",
+      "required": "boolean",
+      "source_index": ["number[]"]
+    }
+  ],
+  "hard_skills": ["string[]"],
+  "soft_skills": ["string[]"],
+  "industry": ["string[]"],
+  "job_type": "全职|实习|兼职|远程|null"
+}

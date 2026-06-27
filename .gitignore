@@ -1,0 +1,32 @@
+# 敏感文件
+.env
+
+# 二进制工具
+cloudflared.exe
+bore.exe
+bore.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 导出文件
+exports/
+*.docx
+*.pdf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
