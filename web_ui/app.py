@@ -11,13 +11,20 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-# 自动加载 .env 文件中的 API Key
+# 自动加载本地 .env 文件中的 API Key
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
+
+# 加载 Streamlit Cloud Secrets 中的 API Key（优先级高于 .env）
+try:
+    if "CAREERAI_API_KEY_DEEPSEEK" in st.secrets:
+        os.environ["CAREERAI_API_KEY_DEEPSEEK"] = st.secrets["CAREERAI_API_KEY_DEEPSEEK"]
+except Exception:
+    pass
 
 from common.language_switch import LanguageSwitch
 
