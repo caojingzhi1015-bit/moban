@@ -138,7 +138,7 @@ class LanguageSwitch:
         # ── 面试 ──
         "interview_title":      {"zh": "AI 模拟面试", "en": "AI Mock Interview"},
         "interview_start":      {"zh": "开始面试", "en": "Start Interview"},
-        "interview_starting":   {"zh": "开始面试 ({})", "en": "Start Interview ({})"},
+        "interview_starting":   {"zh": "开始面试 ({persona})", "en": "Start Interview ({persona})"},
         "interview_placeholder":{
             "zh": "输入你的回答...（输入「继续」跳过当前话题）",
             "en": "Your answer... (type 'continue' or 'next' to skip topic)",

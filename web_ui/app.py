@@ -304,7 +304,7 @@ for k, v in DEFAULTS.items():
 LanguageSwitch.set_lang(st.session_state.lang)
 
 PERSONA_LABELS = {"hr":"HR","tech":"Tech","stress":"Stress","english":"English"}
-t = lambda key: LanguageSwitch.t(key, st.session_state.lang)
+t = lambda key, **fmt: LanguageSwitch.t(key, st.session_state.lang, **fmt)
 
 # ── Gateway（缓存 + 自动注入 st.secrets）──
 @st.cache_resource
