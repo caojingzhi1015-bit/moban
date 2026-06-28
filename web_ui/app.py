@@ -14,50 +14,56 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ═══════════════════════════════════════════════════════════════
-# API Key 统一加载（3 级优先级：st.secrets > .env > 环境变量）
+# API Key 加载 — 统一入口（优先 st.secrets，兜底 .env / 环境变量）
+# 策略：直接注入 os.environ，Gateway.__init__ 自带 _load_api_keys_from_env()
 # ═══════════════════════════════════════════════════════════════
 
-def _load_api_keys() -> dict[str, str]:
-    """加载所有可用的 API Key，返回 {模型名: key} 映射"""
-    loaded: dict[str, str] = {}
+# Step 1: 加载 .env 文件（本地开发）
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _env_path = Path(__file__).parent.parent / ".env"
+    if _env_path.exists():
+        _load_dotenv(_env_path, override=False)
+except Exception:
+    pass
 
-    # Level 1: 从 .env 文件加载（最低优先级，不覆盖已存在的环境变量）
-    try:
-        from dotenv import load_dotenv
-        env_path = Path(__file__).parent.parent / ".env"
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
-    except ImportError:
-        pass
+# Step 2: 从 Streamlit Secrets 注入 os.environ（Streamlit Cloud）
+# 注意：此时 st 尚未初始化，必须用延迟回调。这里只定义函数，由 get_gateway() 调用。
+_KEYS_INJECTED = False
 
-    # Level 2: 环境变量
-    env_map = {
-        "CAREERAI_API_KEY_DEEPSEEK": "deepseek",
-        "CAREERAI_API_KEY_DOUBAO": "doubao",
-        "CAREERAI_API_KEY_GEMINI": "gemini",
-        "CAREERAI_API_KEY_CLAUDE": "claude",
-        "CAREERAI_API_KEY_CHATGPT": "gpt",
-    }
-    for env_var, name in env_map.items():
-        val = os.environ.get(env_var, "").strip()
-        if val:
-            loaded[name] = val
+_SECRET_ENV_MAP = {
+    "CAREERAI_API_KEY_DEEPSEEK": "deepseek",
+    "CAREERAI_API_KEY_DOUBAO": "doubao",
+    "CAREERAI_API_KEY_GEMINI": "gemini",
+    "CAREERAI_API_KEY_CLAUDE": "claude",
+    "CAREERAI_API_KEY_CHATGPT": "gpt",
+}
 
-    # Level 3: Streamlit Secrets（最高优先级）
+def _inject_secrets_to_env():
+    """将 st.secrets 中的 API Key 同步到 os.environ（幂等，仅执行一次）。"""
+    global _KEYS_INJECTED
+    if _KEYS_INJECTED:
+        return
+    _KEYS_INJECTED = True
+
     import streamlit as st
-    try:
-        for secret_key, name in env_map.items():
-            if secret_key in st.secrets:
-                val = str(st.secrets[secret_key]).strip()
-                if val:
-                    loaded[name] = val
-                    os.environ[secret_key] = val  # 同步到环境变量
-    except Exception:
-        pass
-
-    return loaded
-
-_API_KEYS_LOADED = _load_api_keys()
+    injected = []
+    for env_var in _SECRET_ENV_MAP:
+        val = ""
+        try:
+            # st.secrets 支持 [] 访问和属性访问，但不一定有 .get()
+            val = st.secrets[env_var]
+        except Exception:
+            try:
+                val = getattr(st.secrets, env_var, "")
+            except Exception:
+                pass
+        val = str(val).strip() if val else ""
+        if val and not os.environ.get(env_var, "").strip():
+            os.environ[env_var] = val
+            injected.append(env_var)
+    if injected:
+        print(f"[API] Injected from st.secrets: {injected}")
 
 import streamlit as st
 
@@ -300,25 +306,20 @@ LanguageSwitch.set_lang(st.session_state.lang)
 PERSONA_LABELS = {"hr":"HR","tech":"Tech","stress":"Stress","english":"English"}
 t = lambda key: LanguageSwitch.t(key, st.session_state.lang)
 
-# ── Gateway (defined before use) ──
-@st.cache_resource(ttl=300)  # 5 分钟 TTL，避免缓存过期 API key
+# ── Gateway（缓存 + 自动注入 st.secrets）──
+@st.cache_resource
 def get_gateway() -> MultiModelGateway:
-    """获取网关实例（带缓存），自动注入已加载的 API Keys"""
-    gw = MultiModelGateway()
-    # 注入从 .env / secrets / 环境变量 加载的 API Key
-    for model_name in gw.MODELS:
-        if model_name.startswith("deepseek") and "deepseek" in _API_KEYS_LOADED:
-            gw.set_api_key(model_name, _API_KEYS_LOADED["deepseek"])
-        elif model_name in _API_KEYS_LOADED:
-            gw.set_api_key(model_name, _API_KEYS_LOADED[model_name])
-    return gw
+    """获取网关实例（Streamlit 缓存），首次调用时注入 st.secrets 到环境变量"""
+    _inject_secrets_to_env()  # 同步 st.secrets → os.environ（一次）
+    return MultiModelGateway()  # __init__ 自带 _load_api_keys_from_env()
 
-# ── 启动时 API 状态检查 ──
 def _check_api_status() -> bool:
     """检查是否有至少一个 API Key 已配置"""
-    gw = get_gateway()
-    configured = [k for k, v in gw.validate_api_keys().items() if v]
-    return len(configured) > 0
+    try:
+        gw = get_gateway()
+        return any(gw.validate_api_keys().values())
+    except Exception:
+        return False
 
 # ═══════════════════════════════════════════════════
 # SIDEBAR - 260px fixed, high-contrast glass design
