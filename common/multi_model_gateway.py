@@ -78,7 +78,7 @@ class GatewayConfig:
     max_rpm: int = 30               # 每分钟最大请求数
     max_retries: int = 3            # 最大重试次数
     retry_delay: float = 1.0       # 重试间隔(秒)
-    balance_alert_threshold: float = 1.0  # 余额告警阈值(美元)
+    balance_alert_threshold: float = 10.0  # 余额告警阈值(美元)
     enable_auto_fallback: bool = True     # 自动降级切换模型
 
 
@@ -193,7 +193,11 @@ class MultiModelGateway:
     async def close(self) -> None:
         """关闭 HTTP 客户端"""
         if self._client:
-            await self._client.aclose()
+            try:
+                await self._client.aclose()
+            except RuntimeError:
+                # 事件循环已关闭时忽略
+                pass
             self._client = None
 
     # ──────────── 模型选择 ────────────

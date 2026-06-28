@@ -11,20 +11,55 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-# 自动加载本地 .env 文件中的 API Key
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import streamlit as st
+# ═══════════════════════════════════════════════════════════════
+# API Key 统一加载（3 级优先级：st.secrets > .env > 环境变量）
+# ═══════════════════════════════════════════════════════════════
 
-# 加载 Streamlit Cloud Secrets 中的 API Key（优先级高于 .env）
-try:
-    if "CAREERAI_API_KEY_DEEPSEEK" in st.secrets:
-        os.environ["CAREERAI_API_KEY_DEEPSEEK"] = st.secrets["CAREERAI_API_KEY_DEEPSEEK"]
-except Exception:
-    pass
+def _load_api_keys() -> dict[str, str]:
+    """加载所有可用的 API Key，返回 {模型名: key} 映射"""
+    loaded: dict[str, str] = {}
+
+    # Level 1: 从 .env 文件加载（最低优先级，不覆盖已存在的环境变量）
+    try:
+        from dotenv import load_dotenv
+        env_path = Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+    except ImportError:
+        pass
+
+    # Level 2: 环境变量
+    env_map = {
+        "CAREERAI_API_KEY_DEEPSEEK": "deepseek",
+        "CAREERAI_API_KEY_DOUBAO": "doubao",
+        "CAREERAI_API_KEY_GEMINI": "gemini",
+        "CAREERAI_API_KEY_CLAUDE": "claude",
+        "CAREERAI_API_KEY_CHATGPT": "gpt",
+    }
+    for env_var, name in env_map.items():
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            loaded[name] = val
+
+    # Level 3: Streamlit Secrets（最高优先级）
+    import streamlit as st
+    try:
+        for secret_key, name in env_map.items():
+            if secret_key in st.secrets:
+                val = str(st.secrets[secret_key]).strip()
+                if val:
+                    loaded[name] = val
+                    os.environ[secret_key] = val  # 同步到环境变量
+    except Exception:
+        pass
+
+    return loaded
+
+_API_KEYS_LOADED = _load_api_keys()
+
+import streamlit as st
 
 from common.language_switch import LanguageSwitch
 
@@ -34,18 +69,28 @@ from common.language_switch import LanguageSwitch
 def _run_async(coro):
     """
     在 Streamlit 回调中安全执行异步函数。
-    Streamlit 1.28+ 在部分回调中有自己的事件循环，
-    此时 asyncio.run() 会抛 RuntimeError。
+
+    Streamlit 1.28+ 在部分场景有自己的事件循环，
+    此时 asyncio.run() 会在当前线程抛出 RuntimeError。
+
+    策略:
+      1. 尝试直接 asyncio.run() —— 适用于无事件循环的线程
+      2. RuntimeError → 用线程池在新线程中执行（绕过事件循环冲突）
+      3. 所有异常透传，让调用方处理 UI 展示
     """
+    import concurrent.futures
     try:
-        # 优先：当前线程无事件循环时直接 run
         return asyncio.run(coro)
-    except RuntimeError:
-        # 已有事件循环（如某些 Streamlit 版本）→ 用线程池
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
+    except RuntimeError as e:
+        if "event loop" in str(e).lower() or "cannot be called" in str(e).lower():
+            # 已有事件循环（Streamlit 内部线程）→ 用线程池隔离
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        raise
+    except Exception:
+        # 业务异常直接透传
+        raise
 
 from common.multi_model_gateway import MultiModelGateway
 from common.ocr_pdf_processor import OcrPdfProcessor
@@ -256,9 +301,24 @@ PERSONA_LABELS = {"hr":"HR","tech":"Tech","stress":"Stress","english":"English"}
 t = lambda key: LanguageSwitch.t(key, st.session_state.lang)
 
 # ── Gateway (defined before use) ──
-@st.cache_resource
+@st.cache_resource(ttl=300)  # 5 分钟 TTL，避免缓存过期 API key
 def get_gateway() -> MultiModelGateway:
-    return MultiModelGateway()
+    """获取网关实例（带缓存），自动注入已加载的 API Keys"""
+    gw = MultiModelGateway()
+    # 注入从 .env / secrets / 环境变量 加载的 API Key
+    for model_name in gw.MODELS:
+        if model_name.startswith("deepseek") and "deepseek" in _API_KEYS_LOADED:
+            gw.set_api_key(model_name, _API_KEYS_LOADED["deepseek"])
+        elif model_name in _API_KEYS_LOADED:
+            gw.set_api_key(model_name, _API_KEYS_LOADED[model_name])
+    return gw
+
+# ── 启动时 API 状态检查 ──
+def _check_api_status() -> bool:
+    """检查是否有至少一个 API Key 已配置"""
+    gw = get_gateway()
+    configured = [k for k, v in gw.validate_api_keys().items() if v]
+    return len(configured) > 0
 
 # ═══════════════════════════════════════════════════
 # SIDEBAR - 260px fixed, high-contrast glass design
@@ -373,7 +433,18 @@ with st.sidebar:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 2. Model ──
+    # ── 2. API Status ──
+    st.markdown('<div class="sb-card">', unsafe_allow_html=True)
+    st.markdown(f'<p class="sb-title">🔑 API STATUS</p>', unsafe_allow_html=True)
+    if _check_api_status():
+        gw = get_gateway()
+        configured = [k for k, v in gw.validate_api_keys().items() if v]
+        st.success(f"✅ Connected: {', '.join(configured)}")
+    else:
+        st.error("❌ No API Key")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── 3. Model ──
     st.markdown('<div class="sb-card">', unsafe_allow_html=True)
     st.markdown(f'<p class="sb-title">{t("sidebar_model")}</p>', unsafe_allow_html=True)
     model_choice = st.selectbox(
@@ -391,7 +462,7 @@ with st.sidebar:
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 3. Interviewer ──
+    # ── 4. Interviewer ──
     st.markdown('<div class="sb-card">', unsafe_allow_html=True)
     st.markdown(f'<p class="sb-title">{t("sidebar_interviewer")}</p>', unsafe_allow_html=True)
     persona = st.selectbox(
@@ -403,7 +474,7 @@ with st.sidebar:
     st.session_state.interview_persona = persona
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 4. Export ──
+    # ── 5. Export ──
     st.markdown('<div class="sb-card">', unsafe_allow_html=True)
     st.markdown(f'<p class="sb-title">{t("sidebar_export")}</p>', unsafe_allow_html=True)
     if st.session_state.generated_result:
@@ -590,11 +661,20 @@ if st.session_state.jd_parsed and st.session_state.resume_parsed:
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.markdown(f"### {t('module_interview')}")
 
-# API Key 状态检查
+# API Key 状态检查（带详细反馈）
 gw_status = get_gateway()
-api_keys_ok = any(gw_status.validate_api_keys().values())
+api_keys_ok = _check_api_status()
 if not api_keys_ok:
-    st.warning(t("api_key_warning"))
+    st.error(
+        "🔑 **未检测到 API Key！**\n\n"
+        "请在项目根目录的 `.env` 文件中设置：\n"
+        "```\nCAREERAI_API_KEY_DEEPSEEK=sk-你的密钥\n```\n"
+        "或创建 `.streamlit/secrets.toml` 文件（Streamlit Cloud 部署用）。\n\n"
+        "💡 获取 DeepSeek API Key: https://platform.deepseek.com/api_keys"
+    )
+else:
+    configured = [k for k, v in gw_status.validate_api_keys().items() if v]
+    st.success(f"✅ API 已连接: {', '.join(configured)}")
 
 if st.session_state.jd_parsed and st.session_state.resume_parsed:
     ci, cr = st.columns([3,1])
