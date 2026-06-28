@@ -680,8 +680,8 @@ else:
 if st.session_state.jd_parsed and st.session_state.resume_parsed:
     ci, cr = st.columns([3,1])
     with ci:
-        persona_label = PERSONA_LABELS.get(st.session_state.interview_persona,"HR")
-        if st.button(t("interview_starting", persona=persona_label), key="btn_intv"):
+        persona_label = PERSONA_LABELS.get(st.session_state.interview_persona, "HR")
+        if st.button(f"{t('interview_starting')} ({persona_label})", key="btn_intv"):
             interviewer = AIInterviewer()
             interviewer.init_session(st.session_state.jd_parsed, st.session_state.resume_parsed,
                                      persona=st.session_state.interview_persona)

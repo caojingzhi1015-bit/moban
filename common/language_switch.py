@@ -133,12 +133,12 @@ class LanguageSwitch:
 
         # ── 自我介绍 ──
         "intro_title":    {"zh": "🎤 自我介绍", "en": "🎤 Self-Introduction"},
-        "intro_reading_time": {"zh": "朗读时长约 {} 秒 ({} 字)", "en": "Reading time ~{}s ({} chars)"},
+        "intro_reading_time": {"zh": "朗读时长约 {seconds} 秒 ({chars} 字)", "en": "Reading time ~{seconds}s ({chars} chars)"},
 
         # ── 面试 ──
         "interview_title":      {"zh": "AI 模拟面试", "en": "AI Mock Interview"},
         "interview_start":      {"zh": "开始面试", "en": "Start Interview"},
-        "interview_starting":   {"zh": "开始面试 ({persona})", "en": "Start Interview ({persona})"},
+        "interview_starting":   {"zh": "开始面试", "en": "Start Interview"},
         "interview_placeholder":{
             "zh": "输入你的回答...（输入「继续」跳过当前话题）",
             "en": "Your answer... (type 'continue' or 'next' to skip topic)",
@@ -198,7 +198,11 @@ class LanguageSwitch:
             return key
         text = entry.get(lang or cls._lang, entry.get("zh", key))
         if fmt:
-            text = text.format(**fmt)
+            try:
+                text = text.format(**fmt)
+            except (IndexError, KeyError, ValueError):
+                # 格式化失败返回原文，防止页面崩溃
+                pass
         return text
 
     @classmethod
