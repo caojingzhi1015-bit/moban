@@ -30,3 +30,7 @@ Thumbs.db
 
 # Streamlit secrets only
 .streamlit/secrets.toml
+
+# Large zip archives
+*.zip
+BabelDOC/
