@@ -434,15 +434,59 @@ with st.sidebar:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 2. API Status ──
+    # ── 2. API Key 输入（用户自带 Key）──
     st.markdown('<div class="sb-card">', unsafe_allow_html=True)
-    st.markdown(f'<p class="sb-title">🔑 API STATUS</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="sb-title">🔑 API KEY</p>', unsafe_allow_html=True)
+
+    # 选择 AI 提供商
+    api_provider = st.selectbox(
+        "AI Provider",
+        ["deepseek", "doubao", "gpt", "claude", "gemini"],
+        format_func=lambda x: {
+            "deepseek": "DeepSeek (推荐/便宜)",
+            "doubao": "Doubao (豆包)",
+            "gpt": "GPT-4o",
+            "claude": "Claude",
+            "gemini": "Gemini",
+        }.get(x, x),
+        label_visibility="collapsed",
+        key="sidebar_api_provider",
+    )
+
+    # API Key 输入框
+    env_key_name = f"CAREERAI_API_KEY_{api_provider.upper()}"
+    current_val = os.environ.get(env_key_name, "")
+
+    user_key = st.text_input(
+        "输入你的 API Key",
+        type="password",
+        value=current_val[:8] + "..." + current_val[-4:] if current_val and len(current_val) > 12 else current_val,
+        placeholder="sk-xxxxxxxxxxxxxxxx",
+        label_visibility="collapsed",
+        key="sidebar_api_key_input",
+    )
+
+    # 点击 Apply 生效
+    if st.button("🔗 应用 Key", key="btn_apply_key", use_container_width=True):
+        if user_key and not user_key.startswith("sk-...") and len(user_key) > 10:
+            os.environ[env_key_name] = user_key
+            # 清除 gateway 缓存（如果有的话）
+            st.cache_resource.clear()
+            st.success(f"✅ {api_provider} Key 已生效！")
+            st.rerun()
+        elif user_key and "..." in user_key:
+            st.info("Key 已在使用中")
+        else:
+            st.warning("请输入有效的 API Key")
+
+    # 状态显示
     if _check_api_status():
         gw = get_gateway()
         configured = [k for k, v in gw.validate_api_keys().items() if v]
-        st.success(f"✅ Connected: {', '.join(configured)}")
+        st.success(f"✅ 已连接: {', '.join(configured)}")
     else:
-        st.error("❌ No API Key")
+        st.warning("⚠️ 请粘贴你的 API Key")
+        st.caption("💡 [获取免费 DeepSeek Key](https://platform.deepseek.com/api_keys)")
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── 3. Model ──
@@ -668,10 +712,8 @@ api_keys_ok = _check_api_status()
 if not api_keys_ok:
     st.error(
         "🔑 **未检测到 API Key！**\n\n"
-        "请在项目根目录的 `.env` 文件中设置：\n"
-        "```\nCAREERAI_API_KEY_DEEPSEEK=sk-你的密钥\n```\n"
-        "或创建 `.streamlit/secrets.toml` 文件（Streamlit Cloud 部署用）。\n\n"
-        "💡 获取 DeepSeek API Key: https://platform.deepseek.com/api_keys"
+        "👈 **在左侧边栏粘贴你的 API Key 即可使用**\n\n"
+        "💡 免费获取 DeepSeek Key: https://platform.deepseek.com/api_keys"
     )
 else:
     configured = [k for k, v in gw_status.validate_api_keys().items() if v]
